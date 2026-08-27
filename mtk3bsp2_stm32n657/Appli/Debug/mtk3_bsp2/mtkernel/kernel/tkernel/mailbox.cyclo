@@ -1,0 +1,13 @@
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/mtkernel/include/sys/queue.h:40:13:QueInit	1
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/mtkernel/include/sys/queue.h:49:13:isQueEmpty	1
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/mtkernel/include/sys/queue.h:58:13:QueInsert	1
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/mtkernel/include/sys/queue.h:85:15:QueRemoveNext	2
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/cpu_status.h:62:13:knl_isTaskIndependent	1
+../mtk3_bsp2/mtkernel/kernel/tkernel/mailbox.h:63:13:knl_queue_insert_mpri	3
+../mtk3_bsp2/mtkernel/kernel/tkernel/mailbox.c:33:11:knl_mailbox_initialize	2
+../mtk3_bsp2/mtkernel/kernel/tkernel/mailbox.c:57:12:tk_cre_mbx	6
+../mtk3_bsp2/mtkernel/kernel/tkernel/mailbox.c:105:12:tk_del_mbx	7
+../mtk3_bsp2/mtkernel/kernel/tkernel/mailbox.c:134:12:tk_snd_mbx	12
+../mtk3_bsp2/mtkernel/kernel/tkernel/mailbox.c:189:12:mbx_chg_pri	1
+../mtk3_bsp2/mtkernel/kernel/tkernel/mailbox.c:206:12:tk_rcv_mbx	14
+../mtk3_bsp2/mtkernel/kernel/tkernel/mailbox.c:246:12:tk_ref_mbx	7

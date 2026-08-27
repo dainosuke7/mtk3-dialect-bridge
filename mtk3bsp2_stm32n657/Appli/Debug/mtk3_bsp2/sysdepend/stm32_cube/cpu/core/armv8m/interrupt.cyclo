@@ -1,0 +1,13 @@
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/include/tk/sysdepend/stm32_cube/cpu/core/armv8m/syslib.h:92:11:in_w	1
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/cpu_status.h:69:13:knl_EnterTaskIndependent	1
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/cpu_status.h:73:13:knl_LeaveTaskIndependent	1
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/sysdepend.h:62:11:knl_get_ipsr	1
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/sysdepend.h:86:13:knl_isb	1
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/sysdepend.h:91:13:knl_dsb	1
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/sysdepend.h:119:13:knl_check_icache	1
+C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/sysdepend.h:124:13:knl_check_dcache	1
+../mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/interrupt.c:33:13:knl_hll_inthdr	1
+../mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/interrupt.c:52:13:knl_systim_inthdr	1
+../mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/interrupt.c:65:11:knl_define_inthdr	5
+../mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/interrupt.c:98:13:knl_return_inthdr	1
+../mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/interrupt.c:108:11:knl_init_interrupt	3
