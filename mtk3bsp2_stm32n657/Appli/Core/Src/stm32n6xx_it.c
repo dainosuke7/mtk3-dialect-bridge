@@ -260,4 +260,13 @@ void I2C1_ER_IRQHandler(void)
 
 /* USER CODE BEGIN 1 */
 
+/*
+ * GPDMA1 Channel 2 (SAI1 Tx DMA). Not CubeMX-generated (SAI1/GPDMA-for-SAI
+ * are not in the .ioc); see MX_SAI1_Init() in main.c for the channel setup.
+ */
+void GPDMA1_Channel2_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hDmaSaiTx);
+}
+
 /* USER CODE END 1 */

@@ -79,6 +79,14 @@ extern I2C_HandleTypeDef hi2c2;
 extern SAI_HandleTypeDef hsai1;
 extern HAL_StatusTypeDef g_sai1_status;
 
+/* SAI1 Tx DMA channel (GPDMA1 Channel 2), set up in MX_SAI1_Init() for
+ * circular double-buffered playback (see that function's comment in
+ * main.c). Exposed so stm32n6xx_it.c's GPDMA1_Channel2_IRQHandler() can
+ * call HAL_DMA_IRQHandler() on it; Application/ code does not need to
+ * touch it directly (it goes through HAL_SAI_Transmit_DMA(&hsai1, ...)
+ * via audio/sai_io.c instead). */
+extern DMA_HandleTypeDef hDmaSaiTx;
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/

@@ -18,4 +18,18 @@ EXPORT ER sai_out_init_check(void);
 /* samples (16bit, L/Rインターリーブ) を count個、ブロッキングで送信する */
 EXPORT ER sai_out_transmit(const H *samples, UINT count);
 
+/*
+ * DMA版 (ダブルバッファ連続再生)。
+ * samplesはダブルバッファ全体(前半+後半)へのポインタ、countはその
+ * 合計サンプル数。GPDMAが循環リンクリストで自動的に折り返し続けるため、
+ * 呼び出しは1回だけでよい。次データの充填はHAL_SAI_TxHalfCpltCallback/
+ * HAL_SAI_TxCpltCallback(呼び出し側で実装)で行うこと。
+ * SAI1本体とTx DMAチャネル(GPDMA1 Channel2)自体はmain.cのMX_SAI1_Init()
+ * で初期化済み。
+ */
+EXPORT ER sai_out_transmit_dma(const H *samples, UINT count);
+
+/* DMAでの連続再生を停止する */
+EXPORT ER sai_out_stop_dma(void);
+
 #endif	/* AUDIO_SAI_IO_H */

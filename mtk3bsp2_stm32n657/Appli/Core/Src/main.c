@@ -58,6 +58,11 @@ I2C_HandleTypeDef hi2c2;
 SAI_HandleTypeDef hsai1;
 HAL_StatusTypeDef g_sai1_status = HAL_ERROR;
 
+/* SAI1 Tx DMA (GPDMA1 Channel 2, circular linked-list -> continuous
+ * double-buffered playback). Needs to be a plain (non-static) global
+ * because stm32n6xx_it.c's GPDMA1_Channel2_IRQHandler() must reach it. */
+DMA_HandleTypeDef hDmaSaiTx;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -68,6 +73,7 @@ static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 
 static void MX_I2C2_Init(void);
+static void MPU_Config(void);
 static void MX_SAI1_Init(void);
 
 /* USER CODE END PFP */
@@ -124,6 +130,47 @@ static void MX_I2C2_Init(void)
 }
 
 /*
+ * MPU configuration: marks the .noncacheable linker section (already
+ * present in STM32N657X0HXQ_LRUN.ld, __snoncacheable/__enoncacheable,
+ * but unused until now) as Normal/Non-cacheable memory, for data that a
+ * DMA engine's own bus-master reads/writes directly and that the CPU
+ * cache would otherwise hide (see the cache note on SaiTxNode/SaiTxQueue
+ * in MX_SAI1_Init() below for why a manual SCB_CleanDCache_by_Addr() is
+ * not enough for those two structures specifically). Not CubeMX-generated
+ * (no MPU_Config() existed before -- SAI1/GPDMA-for-SAI are not in the
+ * .ioc); written using the standard CMSIS/HAL MPU API and the same
+ * ARM_MPU_ATTR_NON_CACHEABLE encoding CubeMX itself uses for this pattern
+ * on other STM32 families, not guessed from scratch. MPU_HFNMI_PRIVDEF
+ * is required when enabling the MPU with only one explicit region so that
+ * every other address (everything not in .noncacheable) keeps falling
+ * back to the default memory map instead of faulting.
+ */
+static void MPU_Config(void)
+{
+  MPU_Attributes_InitTypeDef attr = {0};
+  MPU_Region_InitTypeDef     region = {0};
+
+  HAL_MPU_Disable();
+
+  attr.Number     = MPU_ATTRIBUTES_NUMBER0;
+  attr.Attributes = ARM_MPU_ATTR(ARM_MPU_ATTR_NON_CACHEABLE, ARM_MPU_ATTR_NON_CACHEABLE);
+  HAL_MPU_ConfigMemoryAttributes(&attr);
+
+  region.Enable          = MPU_REGION_ENABLE;
+  region.Number          = MPU_REGION_NUMBER0;
+  region.AttributesIndex = MPU_ATTRIBUTES_NUMBER0;
+  region.BaseAddress     = __NON_CACHEABLE_SECTION_BEGIN;
+  region.LimitAddress    = __NON_CACHEABLE_SECTION_END - 1U;
+  region.AccessPermission = MPU_REGION_ALL_RW;
+  region.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
+  region.DisablePrivExec  = MPU_PRIV_INSTRUCTION_ACCESS_DISABLE;
+  region.IsShareable      = MPU_ACCESS_OUTER_SHAREABLE;
+  HAL_MPU_ConfigRegion(&region);
+
+  HAL_MPU_Enable(MPU_HFNMI_PRIVDEF);
+}
+
+/*
  * SAI1 Initialization Function (WM8904 audio data path)
  *
  * SAI1 is unchecked in the .ioc, so there is no generated MX_SAI1_Init()
@@ -149,12 +196,40 @@ static void MX_I2C2_Init(void)
  * g_sai1_status at HAL_ERROR (or whatever HAL_RCC_OscConfig/
  * HAL_RCCEx_PeriphCLKConfig/HAL_SAI_Init returned) for Application/ code
  * to check and report over UART once the kernel (and libtm_init) is up.
+ *
+ * Also brings up SAI1's Tx DMA channel (GPDMA1 Channel 2) in circular
+ * linked-list mode, so a single HAL_SAI_Transmit_DMA() call plays a
+ * double buffer indefinitely (Application/audio/ refills each half from
+ * HAL_SAI_TxHalfCpltCallback/HAL_SAI_TxCpltCallback). GPDMA1/HPDMA1/
+ * LINKEDLIST were already enabled in the .ioc (unlike SAI1), so
+ * HAL_DMA_MODULE_ENABLED and hal_dma.c/hal_dma_ex.c were already wired
+ * into the build -- this part didn't need the .project-link workaround
+ * SAI1 itself needed. The GPDMA node/queue/channel setup below (node
+ * config fields, linked-list init sequence) is copied from the same
+ * STM32N6570-DK BSP's SAI_MspInit() DMA block, not derived from the
+ * reference manual.
+ *
+ * Cache note: SaiTxNode/SaiTxQueue below are tagged __NON_CACHEABLE (see
+ * MPU_Config() further down in this file, called from main() before the
+ * caches are enabled) instead of being manually cache-cleaned. A manual
+ * clean does not work for this specific pair of structures: GPDMA's
+ * circular linked-list re-reads the head node from RAM on every loop (not
+ * just once at setup), and HAL_SAI_Transmit_DMA() itself (Drivers/, not
+ * ours to edit) writes this node's LinkRegisters right before starting
+ * the channel, leaving no hook to clean afterwards. The actual PCM sample
+ * buffer is a different case -- Application/audio/audio_task.c fully
+ * controls the write-then-read ordering there, so SCB_CleanDCache_by_Addr()
+ * right after each refill is sufficient and that buffer stays in normal
+ * cacheable SRAM.
  */
 static void MX_SAI1_Init(void)
 {
   RCC_OscInitTypeDef       RCC_OscInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
   GPIO_InitTypeDef         GPIO_InitStruct = {0};
+  static DMA_NodeTypeDef   SaiTxNode  __NON_CACHEABLE;
+  static DMA_QListTypeDef  SaiTxQueue __NON_CACHEABLE;
+  DMA_NodeConfTypeDef      dmaNodeConfig = {0};
 
   g_sai1_status = HAL_ERROR;
 
@@ -240,6 +315,94 @@ static void MX_SAI1_Init(void)
   hsai1.SlotInit.SlotActive     = SAI_SLOTACTIVE_0 | SAI_SLOTACTIVE_1;
 
   g_sai1_status = HAL_SAI_Init(&hsai1);
+  if (g_sai1_status != HAL_OK)
+  {
+    return;
+  }
+
+  /* SAI1 Tx DMA: GPDMA1 Channel 2, one linear node, queue set circular so
+   * the whole (double-buffer) region plays on repeat until HAL_SAI_DMAStop()
+   * is called. */
+  __HAL_RCC_GPDMA1_CLK_ENABLE();
+
+  hDmaSaiTx.Instance = GPDMA1_Channel2;
+
+  dmaNodeConfig.NodeType                        = DMA_GPDMA_LINEAR_NODE;
+  dmaNodeConfig.Init.Request                    = GPDMA1_REQUEST_SAI1_A;
+  dmaNodeConfig.Init.BlkHWRequest               = DMA_BREQ_SINGLE_BURST;
+  dmaNodeConfig.Init.Direction                  = DMA_MEMORY_TO_PERIPH;
+  dmaNodeConfig.Init.SrcInc                     = DMA_SINC_INCREMENTED;
+  dmaNodeConfig.Init.DestInc                    = DMA_DINC_FIXED;
+  dmaNodeConfig.Init.SrcDataWidth               = DMA_SRC_DATAWIDTH_HALFWORD;
+  dmaNodeConfig.Init.DestDataWidth              = DMA_DEST_DATAWIDTH_HALFWORD;
+  dmaNodeConfig.Init.SrcBurstLength             = 1;
+  dmaNodeConfig.Init.DestBurstLength            = 1;
+  dmaNodeConfig.Init.Priority                   = DMA_HIGH_PRIORITY;
+  dmaNodeConfig.Init.TransferEventMode          = DMA_TCEM_BLOCK_TRANSFER;
+  dmaNodeConfig.Init.TransferAllocatedPort      = DMA_SRC_ALLOCATED_PORT1 | DMA_DEST_ALLOCATED_PORT0;
+  dmaNodeConfig.DataHandlingConfig.DataExchange  = DMA_EXCHANGE_NONE;
+  dmaNodeConfig.DataHandlingConfig.DataAlignment = DMA_DATA_RIGHTALIGN_ZEROPADDED;
+  dmaNodeConfig.TriggerConfig.TriggerPolarity    = DMA_TRIG_POLARITY_MASKED;
+  dmaNodeConfig.SrcSecure                        = DMA_CHANNEL_SRC_SEC;
+  dmaNodeConfig.DestSecure                       = DMA_CHANNEL_DEST_SEC;
+
+  if (HAL_DMA_ConfigChannelAttributes(&hDmaSaiTx, (DMA_CHANNEL_PRIV | DMA_CHANNEL_SEC
+                                                    | DMA_CHANNEL_SRC_SEC | DMA_CHANNEL_DEST_SEC)) != HAL_OK)
+  {
+    g_sai1_status = HAL_ERROR;
+    return;
+  }
+
+  if (HAL_DMAEx_List_BuildNode(&dmaNodeConfig, &SaiTxNode) != HAL_OK)
+  {
+    g_sai1_status = HAL_ERROR;
+    return;
+  }
+
+  if (HAL_DMAEx_List_InsertNode_Tail(&SaiTxQueue, &SaiTxNode) != HAL_OK)
+  {
+    g_sai1_status = HAL_ERROR;
+    return;
+  }
+
+  if (HAL_DMAEx_List_SetCircularMode(&SaiTxQueue) != HAL_OK)
+  {
+    g_sai1_status = HAL_ERROR;
+    return;
+  }
+
+  hDmaSaiTx.InitLinkedList.Priority          = DMA_HIGH_PRIORITY;
+  hDmaSaiTx.InitLinkedList.LinkStepMode      = DMA_LSM_FULL_EXECUTION;
+  hDmaSaiTx.InitLinkedList.LinkAllocatedPort = DMA_LINK_ALLOCATED_PORT1;
+  hDmaSaiTx.InitLinkedList.TransferEventMode = DMA_TCEM_LAST_LL_ITEM_TRANSFER;
+  hDmaSaiTx.InitLinkedList.LinkedListMode    = DMA_LINKEDLIST_CIRCULAR;
+
+  if (HAL_DMAEx_List_Init(&hDmaSaiTx) != HAL_OK)
+  {
+    g_sai1_status = HAL_ERROR;
+    return;
+  }
+
+  if (HAL_DMAEx_List_LinkQ(&hDmaSaiTx, &SaiTxQueue) != HAL_OK)
+  {
+    g_sai1_status = HAL_ERROR;
+    return;
+  }
+
+  /* SaiTxNode/SaiTxQueue live in the .noncacheable section (MPU_Config(),
+   * called from main() before the caches are enabled, marks that section
+   * Normal/Non-cacheable) precisely because a manual clean here is not
+   * enough: HAL_SAI_Transmit_DMA() itself later writes this node's
+   * LinkRegisters (source address/size) right before enabling the GPDMA
+   * channel, with no hook for us to clean afterwards, and GPDMA re-reads
+   * this same node from RAM on every loop of the circular transfer (not
+   * just the first one). See MPU_Config()'s comment in this file. */
+  __HAL_LINKDMA(&hsai1, hdmatx, hDmaSaiTx);
+
+  HAL_NVIC_SetPriority(GPDMA1_Channel2_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(GPDMA1_Channel2_IRQn);
+
+  g_sai1_status = HAL_OK;
 }
 
 /* USER CODE END 0 */
@@ -252,6 +415,8 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+
+  MPU_Config();	// .noncacheable region for SAI1 Tx DMA node/queue; must run before the caches are enabled below
 
   /* USER CODE END 1 */
 
