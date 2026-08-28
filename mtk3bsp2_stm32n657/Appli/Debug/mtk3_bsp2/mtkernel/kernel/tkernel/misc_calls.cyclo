@@ -1,3 +1,0 @@
-C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Appli/mtk3_bsp2/sysdepend/stm32_cube/cpu/core/armv8m/cpu_status.h:62:13:knl_isTaskIndependent	1
-../mtk3_bsp2/mtkernel/kernel/tkernel/misc_calls.c:27:12:tk_ref_sys	13
-../mtk3_bsp2/mtkernel/kernel/tkernel/misc_calls.c:63:12:tk_ref_ver	1
