@@ -55,6 +55,14 @@ typedef funcptr funcptr_NS;
 
 /* USER CODE BEGIN ET */
 
+/* I2C2 is not enabled in the CubeMX (.ioc) configuration, so it has no
+ * generated init code. WM8904 access code lives in Appli/Application/
+ * (per project convention only that folder should be touched), but the
+ * peripheral clock/GPIO/HAL_I2C_Init bring-up must happen here in
+ * Core/main.c since Application/ has no access to RCC/GPIO. This handle
+ * is exposed so Application/ code can call HAL_I2C_Mem_Read() on it. */
+extern I2C_HandleTypeDef hi2c2;
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
@@ -91,6 +99,12 @@ void Error_Handler(void);
 #define LED_RED_GPIO_Port GPIOG
 
 /* USER CODE BEGIN Private defines */
+
+/* I2C2 (WM8904 control interface, see MX_I2C2_Init() in main.c) */
+#define I2C2_SCL_Pin GPIO_PIN_14
+#define I2C2_SCL_GPIO_Port GPIOD
+#define I2C2_SDA_Pin GPIO_PIN_4
+#define I2C2_SDA_GPIO_Port GPIOD
 
 /* USER CODE END Private defines */
 

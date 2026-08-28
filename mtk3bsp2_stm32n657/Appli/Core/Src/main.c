@@ -47,6 +47,11 @@ I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
 
+/* I2C2 is not enabled in the .ioc, so CubeMX generated no hi2c2/init code
+ * for it. It is brought up manually below (MX_I2C2_Init) because the
+ * WM8904 audio codec is wired to I2C2 (PD14/PD4), not I2C1. */
+I2C_HandleTypeDef hi2c2;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -56,10 +61,60 @@ static void MX_ADC2_Init(void);
 static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 
+static void MX_I2C2_Init(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/*
+ * I2C2 Initialization Function (WM8904 audio codec control interface)
+ *
+ * Not part of the CubeMX-generated peripherals (I2C2 is unchecked in the
+ * .ioc), so there is no generated MX_I2C2_Init(). Added by hand here,
+ * mirroring MX_I2C1_Init() above, so that Appli/Application/ code can talk
+ * to the WM8904 over I2C2 (PD14=SCL, PD4=SDA) via HAL_I2C_Mem_Read/Write.
+ */
+static void MX_I2C2_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+
+  GPIO_InitStruct.Pin = I2C2_SCL_Pin | I2C2_SDA_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF4_I2C2;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  __HAL_RCC_I2C2_CLK_ENABLE();
+
+  hi2c2.Instance = I2C2;
+  hi2c2.Init.Timing = 0x30C0EDFF;
+  hi2c2.Init.OwnAddress1 = 0;
+  hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c2.Init.OwnAddress2 = 0;
+  hi2c2.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c2.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c2, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c2, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -99,6 +154,8 @@ int main(void)
   MX_ADC2_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
+  MX_I2C2_Init();	// WM8904 (I2C2) bring-up; see MX_I2C2_Init() comment above
+
   void knl_start_mtkernel(void);
   knl_start_mtkernel();
   /* USER CODE END 2 */
