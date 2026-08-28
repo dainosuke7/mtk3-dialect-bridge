@@ -52,4 +52,11 @@ EXPORT ER wm8904_read_device_id(UH *devid);
  */
 EXPORT ER wm8904_init_headphone_16k(UB volume_percent);
 
+/*
+ * DAC_DIGITAL1のDAC_MUTEを解除する(wm8904_init_headphone_16k()の後、
+ * SAI1が実際にクロックを出し始めてから呼ぶこと)。ST公式ドライバの
+ * WM8904_Play()と同じレジスタ値(0x0640)を書き込む。
+ */
+EXPORT ER wm8904_dac_unmute(void);
+
 #endif	/* AUDIO_WM8904_H */

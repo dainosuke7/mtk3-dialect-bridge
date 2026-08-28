@@ -52,6 +52,12 @@ I2C_HandleTypeDef hi2c1;
  * WM8904 audio codec is wired to I2C2 (PD14/PD4), not I2C1. */
 I2C_HandleTypeDef hi2c2;
 
+/* SAI1 is likewise not enabled in the .ioc. g_sai1_status starts at
+ * HAL_ERROR so any code that checks it before MX_SAI1_Init() runs sees a
+ * defined "not ready" value rather than uninitialized memory. */
+SAI_HandleTypeDef hsai1;
+HAL_StatusTypeDef g_sai1_status = HAL_ERROR;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -62,6 +68,7 @@ static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 
 static void MX_I2C2_Init(void);
+static void MX_SAI1_Init(void);
 
 /* USER CODE END PFP */
 
@@ -116,6 +123,125 @@ static void MX_I2C2_Init(void)
   }
 }
 
+/*
+ * SAI1 Initialization Function (WM8904 audio data path)
+ *
+ * SAI1 is unchecked in the .ioc, so there is no generated MX_SAI1_Init()
+ * for the Appli target (it only exists for FSBL, for a different purpose).
+ * Added by hand here, following the same "clock/GPIO/HAL_*_Init only in
+ * main.c" pattern as MX_I2C2_Init() above.
+ *
+ * Clock tree (PLL2 -> IC7 -> SAI1 kernel clock) and the SAI_InitTypeDef /
+ * FrameInit / SlotInit field values below are copied from ST's official
+ * STM32N6570-DK BSP (stm32n6570-dk-bsp repo, stm32n6570_discovery_audio.c:
+ * MX_SAI1_ClockConfig() / MX_SAI1_Init() / SAI_MspInit(), 16kHz-group PLL2
+ * settings), not derived from the datasheet. SAI1_Block_A is configured as
+ * I2S-format master transmitter (FS=PB0, SCK=PB6, SD=PB7, MCLK=PG7, AF6),
+ * 16kHz/16bit, with MCLK output enabled, matching the WM8904 side
+ * (AUDIO_INTERFACE1 = 16bit/I2S, CLOCK_RATES1 = 16kHz) configured in
+ * audio/wm8904.c.
+ *
+ * Unlike MX_I2C1_Init()/MX_I2C2_Init(), this function does NOT call
+ * Error_Handler() on failure: tm_printf() is not safe to use before
+ * knl_start_mtkernel() runs (see the g_sai1_status comment in main.h), so
+ * there would be no way to report *why* Error_Handler()'s silent
+ * `while(1)` was hit. Instead every failure just returns early, leaving
+ * g_sai1_status at HAL_ERROR (or whatever HAL_RCC_OscConfig/
+ * HAL_RCCEx_PeriphCLKConfig/HAL_SAI_Init returned) for Application/ code
+ * to check and report over UART once the kernel (and libtm_init) is up.
+ */
+static void MX_SAI1_Init(void)
+{
+  RCC_OscInitTypeDef       RCC_OscInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+  GPIO_InitTypeDef         GPIO_InitStruct = {0};
+
+  g_sai1_status = HAL_ERROR;
+
+  /* SAI1 kernel clock: PLL2 -> IC7, 16kHz group (ClockDivider = 1) */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_NONE;
+  RCC_OscInitStruct.PLL1.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL2.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL2.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL2.PLLFractional = 0;
+  RCC_OscInitStruct.PLL2.PLLM = 6;
+  RCC_OscInitStruct.PLL2.PLLN = 172;
+  RCC_OscInitStruct.PLL2.PLLP1 = 7;
+  RCC_OscInitStruct.PLL2.PLLP2 = 4;
+  RCC_OscInitStruct.PLL3.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL4.PLLState = RCC_PLL_NONE;
+  g_sai1_status = HAL_RCC_OscConfig(&RCC_OscInitStruct);
+  if (g_sai1_status != HAL_OK)
+  {
+    return;
+  }
+
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SAI1;
+  PeriphClkInitStruct.Sai1ClockSelection = RCC_SAI1CLKSOURCE_IC7;
+  PeriphClkInitStruct.ICSelection[RCC_IC7].ClockSelection = RCC_ICCLKSOURCE_PLL2;
+  PeriphClkInitStruct.ICSelection[RCC_IC7].ClockDivider = 1;
+  g_sai1_status = HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct);
+  if (g_sai1_status != HAL_OK)
+  {
+    return;
+  }
+
+  /* SAI1_Block_A pins: FS=PB0, SCK=PB6, SD=PB7, MCLK=PG7 (AF6) */
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
+
+  GPIO_InitStruct.Mode      = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull      = GPIO_NOPULL;
+  GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF6_SAI1;
+
+  GPIO_InitStruct.Pin = SAI1_FS_A_Pin;
+  HAL_GPIO_Init(SAI1_FS_A_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = SAI1_SCK_A_Pin;
+  HAL_GPIO_Init(SAI1_SCK_A_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = SAI1_SD_A_Pin;
+  HAL_GPIO_Init(SAI1_SD_A_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = SAI1_MCLK_A_Pin;
+  HAL_GPIO_Init(SAI1_MCLK_A_GPIO_Port, &GPIO_InitStruct);
+
+  __HAL_RCC_SAI1_CLK_ENABLE();
+
+  /* SAI1_Block_A: master transmitter, 16kHz/16bit, I2S-equivalent frame,
+   * MCLK output enabled */
+  hsai1.Instance = SAI1_Block_A;
+  hsai1.Init.MonoStereoMode    = SAI_STEREOMODE;
+  hsai1.Init.AudioFrequency    = SAI_AUDIO_FREQUENCY_16K;
+  hsai1.Init.AudioMode         = SAI_MODEMASTER_TX;
+  hsai1.Init.NoDivider         = SAI_MASTERDIVIDER_ENABLE;
+  hsai1.Init.Protocol          = SAI_FREE_PROTOCOL;
+  hsai1.Init.DataSize          = SAI_DATASIZE_16;
+  hsai1.Init.FirstBit          = SAI_FIRSTBIT_MSB;
+  hsai1.Init.ClockStrobing     = SAI_CLOCKSTROBING_FALLINGEDGE;
+  hsai1.Init.Synchro           = SAI_ASYNCHRONOUS;
+  hsai1.Init.OutputDrive       = SAI_OUTPUTDRIVE_ENABLE;
+  hsai1.Init.FIFOThreshold     = SAI_FIFOTHRESHOLD_1QF;
+  hsai1.Init.SynchroExt        = SAI_SYNCEXT_DISABLE;
+  hsai1.Init.CompandingMode    = SAI_NOCOMPANDING;
+  hsai1.Init.TriState          = SAI_OUTPUT_NOTRELEASED;
+  hsai1.Init.Mckdiv            = 0U;
+  hsai1.Init.MckOutput         = SAI_MCK_OUTPUT_ENABLE;
+  hsai1.Init.MckOverSampling   = SAI_MCK_OVERSAMPLING_DISABLE;
+  hsai1.Init.PdmInit.Activation = DISABLE;
+
+  hsai1.FrameInit.FrameLength       = 32;
+  hsai1.FrameInit.ActiveFrameLength = 16;
+  hsai1.FrameInit.FSDefinition      = SAI_FS_CHANNEL_IDENTIFICATION;
+  hsai1.FrameInit.FSPolarity        = SAI_FS_ACTIVE_LOW;
+  hsai1.FrameInit.FSOffset          = SAI_FS_BEFOREFIRSTBIT;
+
+  hsai1.SlotInit.FirstBitOffset = 0;
+  hsai1.SlotInit.SlotSize       = SAI_SLOTSIZE_16B;
+  hsai1.SlotInit.SlotNumber     = 2;
+  hsai1.SlotInit.SlotActive     = SAI_SLOTACTIVE_0 | SAI_SLOTACTIVE_1;
+
+  g_sai1_status = HAL_SAI_Init(&hsai1);
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -155,6 +281,7 @@ int main(void)
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   MX_I2C2_Init();	// WM8904 (I2C2) bring-up; see MX_I2C2_Init() comment above
+  MX_SAI1_Init();	// WM8904 audio data path (SAI1); see MX_SAI1_Init() comment above
 
   void knl_start_mtkernel(void);
   knl_start_mtkernel();

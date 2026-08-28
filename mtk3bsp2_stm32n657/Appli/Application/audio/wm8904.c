@@ -122,3 +122,8 @@ EXPORT ER wm8904_init_headphone_16k(UB volume_percent)
 	tm_printf((UB*)"WM8904 init (headphone, 16kHz) done\n");
 	return E_OK;
 }
+
+EXPORT ER wm8904_dac_unmute(void)
+{
+	return wm8904_write_reg(WM8904_REG_DAC_DIGITAL1, 0x0640U);	/* DAC_MUTE = 0 */
+}

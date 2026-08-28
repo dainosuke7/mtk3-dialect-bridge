@@ -63,6 +63,22 @@ typedef funcptr funcptr_NS;
  * is exposed so Application/ code can call HAL_I2C_Mem_Read() on it. */
 extern I2C_HandleTypeDef hi2c2;
 
+/* SAI1 is likewise not enabled in the .ioc (no MX_SAI1_Init generated for
+ * the Appli target). hsai1 drives SAI1_Block_A (master TX, 16kHz/16bit,
+ * MCLK out) for the WM8904. g_sai1_status records whether MX_SAI1_Init()
+ * (clock/GPIO/HAL_SAI_Init, see main.c) succeeded.
+ *
+ * IMPORTANT: tm_printf()/tm_putstring() are NOT safe to call before
+ * knl_start_mtkernel() runs, because libtm_init() (which the UART TX/RX
+ * routines used by tm_printf depend on) is only called from kernel sysinit
+ * (mtkernel/kernel/sysinit/sysinit.c), i.e. *after* knl_start_mtkernel().
+ * So MX_SAI1_Init() must not print and must not block main() on failure
+ * (no Error_Handler()); it only records the result here. Application/
+ * code (running inside a task, after libtm_init() has run) checks
+ * g_sai1_status and reports it over UART. */
+extern SAI_HandleTypeDef hsai1;
+extern HAL_StatusTypeDef g_sai1_status;
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
@@ -105,6 +121,16 @@ void Error_Handler(void);
 #define I2C2_SCL_GPIO_Port GPIOD
 #define I2C2_SDA_Pin GPIO_PIN_4
 #define I2C2_SDA_GPIO_Port GPIOD
+
+/* SAI1_Block_A (WM8904 audio data path, see MX_SAI1_Init() in main.c) */
+#define SAI1_FS_A_Pin GPIO_PIN_0
+#define SAI1_FS_A_GPIO_Port GPIOB
+#define SAI1_SCK_A_Pin GPIO_PIN_6
+#define SAI1_SCK_A_GPIO_Port GPIOB
+#define SAI1_SD_A_Pin GPIO_PIN_7
+#define SAI1_SD_A_GPIO_Port GPIOB
+#define SAI1_MCLK_A_Pin GPIO_PIN_7
+#define SAI1_MCLK_A_GPIO_Port GPIOG
 
 /* USER CODE END Private defines */
 

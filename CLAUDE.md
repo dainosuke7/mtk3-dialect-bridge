@@ -49,6 +49,44 @@
 - 入力経路は暫定で WM8904 経由。余力があれば PDM → MDF に切り替える
 
 
+## ビルド設定の変更について
+Debug/ 配下の makefile / sources.mk / subdir.mk / objects.list は
+CubeIDE が生成する。手動編集しても Clean で消えるため編集しないこと。
+
+ビルド対象の追加・除外は CubeIDE の GUI で行い、.cproject に
+永続化させる(右クリック → Resource Configurations → Exclude from Build)。
+
+## tm_printf の制約
+tm_printf は knl_start_mtkernel() より前では使用できない。
+UART初期化(libtm_init)がカーネル起動経路でしか呼ばれないため。
+main() 内での初期化エラーは Error_Handler() に落ちると
+__disable_irq(); while(1){} で無出力のままハングする。
+
+## HALドライバを追加で使うとき
+Appliプロジェクトは親の Drivers/STM32N6xx_HAL_Driver/Src/ を
+.project の <link> で個別参照している。新しいHALを使う場合は
+CubeIDE で New > File > Advanced > "Link to file in the file system"
+から追加すること。conf.h の MODULE_ENABLED だけでは足りない。
+## HALドライバを追加で使うとき
+Appliプロジェクトは親の Drivers/STM32N6xx_HAL_Driver/Src/ を
+.project の <link> で個別参照している。新しいHALを使う場合:
+1. stm32n6xx_hal_conf.h の HAL_xxx_MODULE_ENABLED を有効化
+2. CubeIDE で New > File > Advanced > "Link to file in the file system"
+   から該当 .c を追加(_ex.c も忘れずに)
+3. Clean → Build
+Debug/配下のmk系を手動編集してはいけない(Cleanで消える)。
+
+## tm_printf の制約
+knl_start_mtkernel() より前では使用不可。UART初期化(libtm_init)が
+カーネル起動経路でしか呼ばれないため。カーネル起動前の初期化関数は
+Error_Handler() を呼ばず、結果を変数に記録してカーネル起動まで
+必ず到達させること。
+
+## デバッグ実行
+必ず mtk3bsp2_stm32n657_FSBL Debug 構成で起動する。
+Appli 単体で起動するとブートシーケンスが成立せず usermain() に
+到達しない。Startup タブに Appli が追加されていることも確認。
+
 
 ## 部門
 RTOSアプリケーション部門・学生部門。カーネル改変は部門違いになる
