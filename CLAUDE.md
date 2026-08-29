@@ -82,6 +82,13 @@ knl_start_mtkernel() より前では使用不可。UART初期化(libtm_init)が
 Error_Handler() を呼ばず、結果を変数に記録してカーネル起動まで
 必ず到達させること。
 
+## FSBLの残留状態
+FSBLがペリフェラルを触った状態でアプリが起動するため、
+HAL_xxx_Init が「既に有効」と判断してHAL_ERRORを返すことがある。
+__HAL_RCC_xxx_FORCE_RESET() / RELEASE_RESET() で
+パワーオンデフォルトに戻してから初期化すること。
+MDF1で実際に発生した。
+
 ## デバッグ実行
 必ず mtk3bsp2_stm32n657_FSBL Debug 構成で起動する。
 Appli 単体で起動するとブートシーケンスが成立せず usermain() に

@@ -63,6 +63,11 @@ HAL_StatusTypeDef g_sai1_status = HAL_ERROR;
  * because stm32n6xx_it.c's GPDMA1_Channel2_IRQHandler() must reach it. */
 DMA_HandleTypeDef hDmaSaiTx;
 
+/* MDF1 is likewise not enabled in the .ioc. */
+MDF_HandleTypeDef hmdf1;
+HAL_StatusTypeDef g_mdf1_status = HAL_ERROR;
+uint32_t g_mdf1_step = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -75,6 +80,7 @@ static void MX_I2C1_Init(void);
 static void MX_I2C2_Init(void);
 static void MPU_Config(void);
 static void MX_SAI1_Init(void);
+static void MX_MDF1_Init(void);
 
 /* USER CODE END PFP */
 
@@ -405,6 +411,124 @@ static void MX_SAI1_Init(void)
   g_sai1_status = HAL_OK;
 }
 
+/*
+ * MDF1 Initialization Function (onboard PDM MEMS mic, U13/U14)
+ *
+ * MDF1 is unchecked in the .ioc for the Appli target (it exists only for
+ * FSBL, for a different purpose), so there is no generated MX_MDF1_Init().
+ * Added by hand here, same pattern as MX_I2C2_Init()/MX_SAI1_Init() above.
+ *
+ * Scope for this pass: clock + GPIO (CCK0/DATIN0) + HAL_MDF_Init() only
+ * (serial interface + common clock parameters). No DMA, no filter/channel
+ * config, no acquisition start yet -- that is a later step. The values
+ * below (PLL3/IC8 clock tree for the 16kHz group, MDF_SITF_NORMAL_SPI_MODE,
+ * MDF_SITF_CCK0_SOURCE, Threshold=31, MDF_BITSTREAM0_FALLING,
+ * ProcClockDivider=2, OutputClockDivider=12) are copied from ST's official
+ * STM32N6570-DK BSP (stm32n6570-dk-bsp repo, stm32n6570_discovery_audio.c:
+ * MX_MDF1_ClockConfig() / MX_MDF1_Init() / MDF_MspInit(), and the
+ * MDF_PROC_CLOCK_DIVIDER(16K)/MDF_OUTPUT_CLOCK_DIVIDER(16K) macros there),
+ * not derived from the reference manual. That same reference does not
+ * configure a CKI pin either (see main.h's MDF1_CCK0_Pin comment) since
+ * MDF_SITF_CCK0_SOURCE uses MDF1's own generated clock, not an external one.
+ *
+ * Same "no Error_Handler(), no tm_printf()" reasoning as MX_SAI1_Init()
+ * applies (see that function's comment): every failure just returns early,
+ * leaving g_mdf1_status at HAL_ERROR (or whatever HAL_RCC_OscConfig/
+ * HAL_RCCEx_PeriphCLKConfig/HAL_MDF_Init returned) for Application/ code to
+ * check and report over UART once the kernel is up.
+ */
+static void MX_MDF1_Init(void)
+{
+  RCC_OscInitTypeDef       RCC_OscInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+  GPIO_InitTypeDef         GPIO_InitStruct = {0};
+
+  g_mdf1_status = HAL_ERROR;
+  g_mdf1_step = 1;	// RCC_OscConfig(PLL3)
+
+  /* MDF1 kernel clock: PLL3 -> IC8, 16kHz group (ClockDivider = 1).
+   * Separate PLL from SAI1's PLL2, so this does not disturb the audio-out
+   * clock already configured by MX_SAI1_Init(). */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_NONE;
+  RCC_OscInitStruct.PLL1.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL2.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL3.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL3.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL3.PLLFractional = 0;
+  RCC_OscInitStruct.PLL3.PLLM = 6;
+  RCC_OscInitStruct.PLL3.PLLN = 172;
+  RCC_OscInitStruct.PLL3.PLLP1 = 7;
+  RCC_OscInitStruct.PLL3.PLLP2 = 4;
+  RCC_OscInitStruct.PLL4.PLLState = RCC_PLL_NONE;
+  g_mdf1_status = HAL_RCC_OscConfig(&RCC_OscInitStruct);
+  if (g_mdf1_status != HAL_OK)
+  {
+    return;
+  }
+
+  g_mdf1_step = 2;	// RCCEx_PeriphCLKConfig(IC8)
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_MDF1;
+  PeriphClkInitStruct.Mdf1ClockSelection = RCC_MDF1CLKSOURCE_IC8;
+  PeriphClkInitStruct.ICSelection[RCC_IC8].ClockSelection = RCC_ICCLKSOURCE_PLL3;
+  PeriphClkInitStruct.ICSelection[RCC_IC8].ClockDivider = 1;
+  g_mdf1_status = HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct);
+  if (g_mdf1_status != HAL_OK)
+  {
+    return;
+  }
+
+  g_mdf1_step = 3;	// GPIO config (CCK0/DATIN0)
+
+  /* MDF1 pins: CCK0=PE2 (output, drives the mics' clock), DATIN0=PE8
+   * (input, PDM bitstream from the mics) */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+
+  GPIO_InitStruct.Mode      = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull      = GPIO_NOPULL;
+  GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF4_MDF1;
+
+  GPIO_InitStruct.Pin = MDF1_CCK0_Pin;
+  HAL_GPIO_Init(MDF1_CCK0_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = MDF1_DATIN0_Pin;
+  HAL_GPIO_Init(MDF1_DATIN0_GPIO_Port, &GPIO_InitStruct);
+
+  __HAL_RCC_MDF1_CLK_ENABLE();
+
+  /* FSBL.IPs includes MDF1 too (see the .ioc), so FSBL likely already
+   * activated MDF1's clock generator/serial interface for its own purpose
+   * before jumping to Appli, and nothing resets the peripheral in between.
+   * HAL_MDF_Init() explicitly checks CKGCR.CCKACTIVE and SITFCR.SITFACTIVE
+   * and returns HAL_ERROR if either is already set (stm32n6xx_hal_mdf.c) --
+   * force-reset the peripheral via RCC first so it starts from the
+   * power-on-default register state regardless of what FSBL left behind. */
+  __HAL_RCC_MDF1_FORCE_RESET();
+  __HAL_RCC_MDF1_RELEASE_RESET();
+
+  /* MDF1_Filter0: common clock params + serial interface only (no filter/
+   * channel/acquisition config yet) */
+  hmdf1.Instance = MDF1_Filter0;
+  hmdf1.Init.CommonParam.ProcClockDivider          = 2U;
+  hmdf1.Init.CommonParam.OutputClock.Activation    = ENABLE;
+  hmdf1.Init.CommonParam.OutputClock.Pins          = MDF_OUTPUT_CLOCK_0;
+  hmdf1.Init.CommonParam.OutputClock.Divider       = 12U;
+  hmdf1.Init.CommonParam.OutputClock.Trigger.Activation = DISABLE;
+  hmdf1.Init.SerialInterface.Activation = ENABLE;
+  hmdf1.Init.SerialInterface.Mode        = MDF_SITF_NORMAL_SPI_MODE;
+  hmdf1.Init.SerialInterface.ClockSource = MDF_SITF_CCK0_SOURCE;
+  hmdf1.Init.SerialInterface.Threshold   = 31U;
+  hmdf1.Init.FilterBistream = MDF_BITSTREAM0_FALLING;
+
+  g_mdf1_step = 4;	// HAL_MDF_Init
+  g_mdf1_status = HAL_MDF_Init(&hmdf1);
+  if (g_mdf1_status != HAL_OK)
+  {
+    return;
+  }
+
+  g_mdf1_step = 5;	// all steps completed
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -447,6 +571,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   MX_I2C2_Init();	// WM8904 (I2C2) bring-up; see MX_I2C2_Init() comment above
   MX_SAI1_Init();	// WM8904 audio data path (SAI1); see MX_SAI1_Init() comment above
+  MX_MDF1_Init();	// onboard PDM mic (MDF1); see MX_MDF1_Init() comment above
 
   void knl_start_mtkernel(void);
   knl_start_mtkernel();

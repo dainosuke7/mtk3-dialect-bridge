@@ -87,6 +87,27 @@ extern HAL_StatusTypeDef g_sai1_status;
  * via audio/sai_io.c instead). */
 extern DMA_HandleTypeDef hDmaSaiTx;
 
+/* MDF1 (onboard PDM MEMS mic, U13/U14) is likewise not enabled in the
+ * .ioc (no MX_MDF1_Init generated for the Appli target; MDF1 is FSBL-only,
+ * same as SAI1 was). hmdf1 drives MDF1_Filter0 (serial interface + common
+ * clock config only, at this stage -- no DMA/filter/acquisition setup
+ * yet). g_mdf1_status records whether MX_MDF1_Init() (clock/GPIO/
+ * HAL_MDF_Init, see main.c) succeeded; same tm_printf-unsafe-before-
+ * kernel-start reasoning as g_sai1_status above applies here too. */
+extern MDF_HandleTypeDef hmdf1;
+extern HAL_StatusTypeDef g_mdf1_status;
+
+/* g_mdf1_step: which step MX_MDF1_Init() was on when it stopped (0=not
+ * started yet, 1=attempting RCC_OscConfig(PLL3), 2=attempting
+ * RCCEx_PeriphCLKConfig(IC8), 3=attempting GPIO config, 4=attempting
+ * HAL_MDF_Init, 5=all steps completed). g_mdf1_status holds the
+ * HAL_StatusTypeDef of whichever call failed at that step (HAL_OK if it
+ * got all the way to step 5). Recorded here for the same reason
+ * g_mdf1_status itself is -- tm_printf() is unsafe before
+ * knl_start_mtkernel() runs, so Application/ code reports these two
+ * values over UART once the kernel is up. */
+extern uint32_t g_mdf1_step;
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
@@ -139,6 +160,16 @@ void Error_Handler(void);
 #define SAI1_SD_A_GPIO_Port GPIOB
 #define SAI1_MCLK_A_Pin GPIO_PIN_7
 #define SAI1_MCLK_A_GPIO_Port GPIOG
+
+/* MDF1 (PDM mic CCK0/DATIN0, see MX_MDF1_Init() in main.c). CKI0 (PE7,
+ * MIC_CK echo-back per the schematic) is not configured: MX_MDF1_Init()
+ * uses MDF_SITF_CCK0_SOURCE (MDF's own generated clock), for which the
+ * ST reference driver (stm32n6570-dk-bsp) does not configure a CKI pin
+ * either -- it is only needed for the external-clock-source mode. */
+#define MDF1_CCK0_Pin GPIO_PIN_2
+#define MDF1_CCK0_GPIO_Port GPIOE
+#define MDF1_DATIN0_Pin GPIO_PIN_8
+#define MDF1_DATIN0_GPIO_Port GPIOE
 
 /* USER CODE END Private defines */
 

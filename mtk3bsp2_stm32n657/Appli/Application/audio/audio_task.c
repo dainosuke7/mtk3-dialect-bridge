@@ -5,6 +5,7 @@
 #include "main.h"	// SAI_HandleTypeDef, SAI1_Block_A, SCB_CleanDCache_by_Addr (DMAコールバック用)
 #include "wm8904.h"
 #include "sai_io.h"
+#include "mdf_io.h"
 #include "audio_task.h"
 
 LOCAL void task_audio(INT stacd, void *exinf);	// task execution function
@@ -154,6 +155,20 @@ LOCAL void task_audio(INT stacd, void *exinf)
 		 * いなければ、再生中に途切れ(アンダーラン)は起きていない) */
 		tm_printf((UB*)"Sine wave DMA playback stopped (half-complete=%u, complete=%u)\n",
 				dma_half_count, dma_cplt_count);
+
+		/* MDF1(オンボードPDMマイク)は今回、初期化(main.cのMX_MDF1_Init())
+		 * がエラーなく通ったかどうかの確認まで。フィルタ設定・DMA・
+		 * データ取得は次のステップ。 */
+		err = mdf_in_init_check();
+		if(err < E_OK) {
+			/* step: 1=RCC_OscConfig(PLL3), 2=RCCEx_PeriphCLKConfig(IC8),
+			 * 3=GPIO設定, 4=HAL_MDF_Init. hal_status: HAL_OK=0, HAL_ERROR=1,
+			 * HAL_BUSY=2, HAL_TIMEOUT=3 */
+			tm_printf((UB*)"MDF1 (PDM mic) init FAIL at step=%u hal_status=%u\n",
+					mdf_in_init_step(), mdf_in_init_hal_status());
+		} else {
+			tm_printf((UB*)"MDF1 (PDM mic) init OK (step=%u)\n", mdf_in_init_step());
+		}
 	} while(0);
 
 	tk_ext_tsk();
