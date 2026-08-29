@@ -68,6 +68,11 @@ MDF_HandleTypeDef hmdf1;
 HAL_StatusTypeDef g_mdf1_status = HAL_ERROR;
 uint32_t g_mdf1_step = 0;
 
+/* MDF1 filter0 Rx DMA (GPDMA1 Channel 0, circular linked-list -> continuous
+ * double-buffered capture). Plain global for the same reason as hDmaSaiTx:
+ * stm32n6xx_it.c's GPDMA1_Channel0_IRQHandler() must reach it. */
+DMA_HandleTypeDef hDmaMdf;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -442,6 +447,9 @@ static void MX_MDF1_Init(void)
   RCC_OscInitTypeDef       RCC_OscInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
   GPIO_InitTypeDef         GPIO_InitStruct = {0};
+  static DMA_NodeTypeDef   MdfRxNode  __NON_CACHEABLE;
+  static DMA_QListTypeDef  MdfRxQueue __NON_CACHEABLE;
+  DMA_NodeConfTypeDef      dmaNodeConfig = {0};
 
   g_mdf1_status = HAL_ERROR;
   g_mdf1_step = 1;	// RCC_OscConfig(PLL3)
@@ -526,7 +534,92 @@ static void MX_MDF1_Init(void)
     return;
   }
 
-  g_mdf1_step = 5;	// all steps completed
+  g_mdf1_step = 5;	// MDF1 filter0 Rx DMA (GPDMA1 Channel 0)
+
+  /* MDF1_Filter0 Rx DMA: GPDMA1 Channel 0, one linear node, queue circular
+   * so the double buffer is filled on repeat until HAL_MDF_AcqStop_DMA().
+   * Node config copied from the same STM32N6570-DK BSP's MDF_MspInit() DMA
+   * block (peripheral-to-memory, fixed source = DFLTDR, incrementing
+   * 32-bit destination).
+   *
+   * MdfRxNode/MdfRxQueue are __NON_CACHEABLE for exactly the same reason as
+   * SAI1's SaiTxNode/SaiTxQueue (see MX_SAI1_Init()'s cache note):
+   * HAL_MDF_AcqStart_DMA() itself writes this node's LinkRegisters (source/
+   * destination address, block size) right before starting the channel, and
+   * GPDMA re-reads the node from RAM on every loop of the circular transfer,
+   * so a one-shot manual cache clean here would not cover it. */
+  __HAL_RCC_GPDMA1_CLK_ENABLE();
+
+  hDmaMdf.Instance = GPDMA1_Channel0;
+
+  dmaNodeConfig.NodeType                         = DMA_GPDMA_LINEAR_NODE;
+  dmaNodeConfig.Init.Request                     = GPDMA1_REQUEST_MDF1_FLT0;
+  dmaNodeConfig.Init.BlkHWRequest                = DMA_BREQ_SINGLE_BURST;
+  dmaNodeConfig.Init.Direction                   = DMA_PERIPH_TO_MEMORY;
+  dmaNodeConfig.Init.SrcInc                      = DMA_SINC_FIXED;
+  dmaNodeConfig.Init.DestInc                     = DMA_DINC_INCREMENTED;
+  dmaNodeConfig.Init.SrcDataWidth                = DMA_SRC_DATAWIDTH_WORD;
+  dmaNodeConfig.Init.DestDataWidth               = DMA_DEST_DATAWIDTH_WORD;
+  dmaNodeConfig.Init.SrcBurstLength              = 1;
+  dmaNodeConfig.Init.DestBurstLength             = 1;
+  dmaNodeConfig.Init.Priority                    = DMA_HIGH_PRIORITY;
+  dmaNodeConfig.Init.TransferEventMode           = DMA_TCEM_BLOCK_TRANSFER;
+  dmaNodeConfig.Init.TransferAllocatedPort       = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT1;
+  dmaNodeConfig.DataHandlingConfig.DataExchange  = DMA_EXCHANGE_NONE;
+  dmaNodeConfig.DataHandlingConfig.DataAlignment = DMA_DATA_RIGHTALIGN_ZEROPADDED;
+  dmaNodeConfig.TriggerConfig.TriggerPolarity    = DMA_TRIG_POLARITY_MASKED;
+  dmaNodeConfig.SrcSecure                        = DMA_CHANNEL_SRC_SEC;
+  dmaNodeConfig.DestSecure                       = DMA_CHANNEL_DEST_SEC;
+
+  if (HAL_DMA_ConfigChannelAttributes(&hDmaMdf, (DMA_CHANNEL_PRIV | DMA_CHANNEL_SEC
+                                                  | DMA_CHANNEL_SRC_SEC | DMA_CHANNEL_DEST_SEC)) != HAL_OK)
+  {
+    g_mdf1_status = HAL_ERROR;
+    return;
+  }
+
+  if (HAL_DMAEx_List_BuildNode(&dmaNodeConfig, &MdfRxNode) != HAL_OK)
+  {
+    g_mdf1_status = HAL_ERROR;
+    return;
+  }
+
+  if (HAL_DMAEx_List_InsertNode_Tail(&MdfRxQueue, &MdfRxNode) != HAL_OK)
+  {
+    g_mdf1_status = HAL_ERROR;
+    return;
+  }
+
+  if (HAL_DMAEx_List_SetCircularMode(&MdfRxQueue) != HAL_OK)
+  {
+    g_mdf1_status = HAL_ERROR;
+    return;
+  }
+
+  hDmaMdf.InitLinkedList.Priority          = DMA_HIGH_PRIORITY;
+  hDmaMdf.InitLinkedList.LinkStepMode      = DMA_LSM_FULL_EXECUTION;
+  hDmaMdf.InitLinkedList.LinkAllocatedPort = DMA_LINK_ALLOCATED_PORT1;
+  hDmaMdf.InitLinkedList.TransferEventMode = DMA_TCEM_LAST_LL_ITEM_TRANSFER;
+  hDmaMdf.InitLinkedList.LinkedListMode    = DMA_LINKEDLIST_CIRCULAR;
+
+  if (HAL_DMAEx_List_Init(&hDmaMdf) != HAL_OK)
+  {
+    g_mdf1_status = HAL_ERROR;
+    return;
+  }
+
+  if (HAL_DMAEx_List_LinkQ(&hDmaMdf, &MdfRxQueue) != HAL_OK)
+  {
+    g_mdf1_status = HAL_ERROR;
+    return;
+  }
+
+  __HAL_LINKDMA(&hmdf1, hdma, hDmaMdf);
+
+  HAL_NVIC_SetPriority(GPDMA1_Channel0_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(GPDMA1_Channel0_IRQn);
+
+  g_mdf1_step = 6;	// all steps completed
 }
 
 /* USER CODE END 0 */

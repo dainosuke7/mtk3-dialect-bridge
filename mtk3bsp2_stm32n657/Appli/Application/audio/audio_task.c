@@ -89,6 +89,132 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai)
 	}
 }
 
+/* ------------------------------------------------------------------ */
+/* MDF1 (PDMマイク) 入力の振幅計測                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * MDFの出力は32bit(上位24bitに有効データ)。ST公式BSPの
+ * HAL_MDF_AcqCpltCallback/AcqHalfCpltCallback と同じく /256 して
+ * 16bitに落とし、飽和させる。
+ */
+#define MDF_SAT16(v)	(((v) > 32767) ? 32767 : (((v) < -32768) ? -32768 : (v)))
+
+typedef struct {
+	W	min;		// 区間内の最小値(16bit換算)
+	W	max;		// 区間内の最大値(16bit換算)
+	UW	sum_abs;	// 絶対値の合計(平均振幅の算出用)
+	UW	samples;	// 加算したサンプル数
+	UW	callbacks;	// コールバック呼び出し回数(取りこぼし検出用)
+} mic_stat_t;
+
+LOCAL volatile mic_stat_t mic_stat;
+
+LOCAL void mic_stat_reset(volatile mic_stat_t *st)
+{
+	st->min       = 32767;
+	st->max       = -32768;
+	st->sum_abs   = 0;
+	st->samples   = 0;
+	st->callbacks = 0;
+}
+
+/* DMAが書き終えた半分を解析して統計に加算する(コールバックから呼ぶ) */
+LOCAL void mic_analyze_half(UINT half)
+{
+	W	*buf;
+	UINT	i;
+	W	v;
+
+	buf = mdf_in_buf_half(half);
+
+	/* DMAがRAMに書いた内容をCPUのキャッシュ越しに読むため、
+	 * 読む直前に該当範囲を無効化する(このバッファにCPUから書き込む
+	 * ことは無いので、invalidateでデータを失う心配はない) */
+	SCB_InvalidateDCache_by_Addr((uint32_t*)buf, MDF_IN_HALF_SAMPLES * sizeof(W));
+
+	for(i = 0; i < MDF_IN_HALF_SAMPLES; i++) {
+		v = buf[i] / 256;
+		v = MDF_SAT16(v);
+		if(v < mic_stat.min) mic_stat.min = v;
+		if(v > mic_stat.max) mic_stat.max = v;
+		mic_stat.sum_abs += (UW)((v < 0) ? -v : v);
+		mic_stat.samples++;
+	}
+	mic_stat.callbacks++;
+}
+
+/* 前半の取り込み完了 = 現在後半に書き込み中 -> 前半を解析 */
+void HAL_MDF_AcqHalfCpltCallback(MDF_HandleTypeDef *hmdf)
+{
+	if(hmdf->Instance == MDF1_Filter0) {
+		mic_analyze_half(0);
+	}
+}
+
+/* バッファ全体の取り込み完了(折返し) = 現在前半に書き込み中 -> 後半を解析 */
+void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
+{
+	if(hmdf->Instance == MDF1_Filter0) {
+		mic_analyze_half(1);
+	}
+}
+
+/*
+ * 統計をスナップショットしてリセットする。コールバック(割り込み)と
+ * 競合するのでDI/EIで割り込みを止めた状態で行う。
+ */
+LOCAL void mic_stat_take(mic_stat_t *out)
+{
+	UINT	imask;
+
+	DI(imask);
+	*out = *(mic_stat_t*)&mic_stat;
+	mic_stat_reset(&mic_stat);
+	EI(imask);
+}
+
+#define MIC_REPORT_INTERVAL_MS	(500)
+#define MIC_REPORT_COUNT	(20)	// 500ms x 20 = 約10秒
+
+LOCAL void mic_capture_test(void)
+{
+	ER		err;
+	UINT		n;
+	mic_stat_t	st;
+	UW		avg_abs;
+
+	mic_stat_reset(&mic_stat);
+
+	err = mdf_in_start_dma();
+	if(err < E_OK) {
+		tm_printf((UB*)"MDF1 acquisition start FAIL (err=%d)\n", err);
+		return;
+	}
+	tm_printf((UB*)"MDF1 acquisition start OK (16kHz, double buffer %d+%d samples)\n",
+			MDF_IN_HALF_SAMPLES, MDF_IN_HALF_SAMPLES);
+	tm_printf((UB*)"Speak into the onboard mics; amplitude should rise.\n");
+
+	for(n = 0; n < MIC_REPORT_COUNT; n++) {
+		tk_dly_tsk(MIC_REPORT_INTERVAL_MS);
+		mic_stat_take(&st);
+		if(st.samples == 0) {
+			tm_printf((UB*)"  mic[%d]: no data (callbacks=0)\n", n);
+			continue;
+		}
+		avg_abs = st.sum_abs / st.samples;
+		tm_printf((UB*)"  mic[%d]: min=%d max=%d avg_abs=%u (n=%u, cb=%u)\n",
+				n, st.min, st.max, avg_abs, st.samples, st.callbacks);
+	}
+
+	err = mdf_in_stop_dma();
+	if(err < E_OK) {
+		tm_printf((UB*)"MDF1 acquisition stop FAIL (err=%d)\n", err);
+	} else {
+		tm_printf((UB*)"MDF1 acquisition stopped\n");
+	}
+}
+
 LOCAL void task_audio(INT stacd, void *exinf)
 {
 	ER	err;
@@ -162,13 +288,15 @@ LOCAL void task_audio(INT stacd, void *exinf)
 		err = mdf_in_init_check();
 		if(err < E_OK) {
 			/* step: 1=RCC_OscConfig(PLL3), 2=RCCEx_PeriphCLKConfig(IC8),
-			 * 3=GPIO設定, 4=HAL_MDF_Init. hal_status: HAL_OK=0, HAL_ERROR=1,
-			 * HAL_BUSY=2, HAL_TIMEOUT=3 */
+			 * 3=GPIO設定, 4=HAL_MDF_Init, 5=Rx DMA設定.
+			 * hal_status: HAL_OK=0, HAL_ERROR=1, HAL_BUSY=2, HAL_TIMEOUT=3 */
 			tm_printf((UB*)"MDF1 (PDM mic) init FAIL at step=%u hal_status=%u\n",
 					mdf_in_init_step(), mdf_in_init_hal_status());
-		} else {
-			tm_printf((UB*)"MDF1 (PDM mic) init OK (step=%u)\n", mdf_in_init_step());
+			break;
 		}
+		tm_printf((UB*)"MDF1 (PDM mic) init OK (step=%u)\n", mdf_in_init_step());
+
+		mic_capture_test();
 	} while(0);
 
 	tk_ext_tsk();

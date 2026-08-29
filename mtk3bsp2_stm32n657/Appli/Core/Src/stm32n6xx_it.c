@@ -269,4 +269,13 @@ void GPDMA1_Channel2_IRQHandler(void)
   HAL_DMA_IRQHandler(&hDmaSaiTx);
 }
 
+/*
+ * GPDMA1 Channel 0 (MDF1 filter0 Rx DMA, onboard PDM mic). Likewise not
+ * CubeMX-generated; see MX_MDF1_Init() in main.c for the channel setup.
+ */
+void GPDMA1_Channel0_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hDmaMdf);
+}
+
 /* USER CODE END 1 */

@@ -100,13 +100,20 @@ extern HAL_StatusTypeDef g_mdf1_status;
 /* g_mdf1_step: which step MX_MDF1_Init() was on when it stopped (0=not
  * started yet, 1=attempting RCC_OscConfig(PLL3), 2=attempting
  * RCCEx_PeriphCLKConfig(IC8), 3=attempting GPIO config, 4=attempting
- * HAL_MDF_Init, 5=all steps completed). g_mdf1_status holds the
+ * HAL_MDF_Init, 5=attempting Rx DMA (GPDMA1 Channel 0) setup,
+ * 6=all steps completed). g_mdf1_status holds the
  * HAL_StatusTypeDef of whichever call failed at that step (HAL_OK if it
  * got all the way to step 5). Recorded here for the same reason
  * g_mdf1_status itself is -- tm_printf() is unsafe before
  * knl_start_mtkernel() runs, so Application/ code reports these two
  * values over UART once the kernel is up. */
 extern uint32_t g_mdf1_step;
+
+/* MDF1 filter0 Rx DMA channel (GPDMA1 Channel 0), set up in MX_MDF1_Init()
+ * for circular double-buffered capture. Exposed so stm32n6xx_it.c's
+ * GPDMA1_Channel0_IRQHandler() can call HAL_DMA_IRQHandler() on it;
+ * Application/ code goes through audio/mdf_io.c instead. */
+extern DMA_HandleTypeDef hDmaMdf;
 
 /* USER CODE END ET */
 
