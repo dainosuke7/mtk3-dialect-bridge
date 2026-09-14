@@ -2,6 +2,7 @@ logs/
 .claude/
 
 **/.settings/com.st.stm32cube.ide.mcu.sfrview.prefs
+**/.settings/language.settings.xml
 
 # ビルド生成物 (makefile/sources.mk/subdir.mk等のmk系はscripts/build.shが
 # 依存するため追跡を維持し、拡張子ベースでビルド成果物のみ除外する)
