@@ -32,3 +32,13 @@ EXPORT ER sai_out_stop_dma(void)
 	hal_sts = HAL_SAI_DMAStop(&hsai1);
 	return (hal_sts == HAL_OK) ? E_OK : E_IO;
 }
+
+EXPORT UW sai_out_kernel_clock(void)
+{
+	return (UW)g_sai1_kerclk;
+}
+
+EXPORT UW sai_out_mckdiv(void)
+{
+	return (UW)g_sai1_mckdiv;
+}

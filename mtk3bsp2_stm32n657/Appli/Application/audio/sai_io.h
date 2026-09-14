@@ -32,4 +32,9 @@ EXPORT ER sai_out_transmit_dma(const H *samples, UINT count);
 /* DMAでの連続再生を停止する */
 EXPORT ER sai_out_stop_dma(void);
 
+/* 実際の出力サンプリングレート確認用(main.h の g_sai1_kerclk /
+ * g_sai1_mckdiv をそのまま返す)。Fs = kerclk / (mckdiv * 256) */
+EXPORT UW sai_out_kernel_clock(void);
+EXPORT UW sai_out_mckdiv(void);
+
 #endif	/* AUDIO_SAI_IO_H */

@@ -73,6 +73,13 @@ uint32_t g_mdf1_step = 0;
  * stm32n6xx_it.c's GPDMA1_Channel0_IRQHandler() must reach it. */
 DMA_HandleTypeDef hDmaMdf;
 
+/* SAI1のマスタクロック分周比(16kHz用)。導出はMX_SAI1_Init()のコメント参照 */
+#define SAI1_MCKDIV_16K		(12U)
+
+/* 実効レートの確認用。Fs = kerclk / (mckdiv * 256) */
+uint32_t g_sai1_kerclk = 0;
+uint32_t g_sai1_mckdiv = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -296,7 +303,11 @@ static void MX_SAI1_Init(void)
    * MCLK output enabled */
   hsai1.Instance = SAI1_Block_A;
   hsai1.Init.MonoStereoMode    = SAI_STEREOMODE;
-  hsai1.Init.AudioFrequency    = SAI_AUDIO_FREQUENCY_16K;
+  /* HALの自動計算(MCKDIV = GetPeriphCLKFreq(SAI1)/(Fs*256))はこの環境で
+   * 半分の値を返し、出力が約32kHz(1オクターブ上)になっていた。カーネル
+   * クロックは上で自分で組んだ値(PLL2 49.142MHz → IC7分周1)が分かって
+   * いるので、MCKDIVを直接与える。49.142e6/12/256 = 15997Hz */
+  hsai1.Init.AudioFrequency    = SAI_AUDIO_FREQUENCY_MCKDIV;
   hsai1.Init.AudioMode         = SAI_MODEMASTER_TX;
   hsai1.Init.NoDivider         = SAI_MASTERDIVIDER_ENABLE;
   hsai1.Init.Protocol          = SAI_FREE_PROTOCOL;
@@ -309,7 +320,7 @@ static void MX_SAI1_Init(void)
   hsai1.Init.SynchroExt        = SAI_SYNCEXT_DISABLE;
   hsai1.Init.CompandingMode    = SAI_NOCOMPANDING;
   hsai1.Init.TriState          = SAI_OUTPUT_NOTRELEASED;
-  hsai1.Init.Mckdiv            = 0U;
+  hsai1.Init.Mckdiv            = SAI1_MCKDIV_16K;
   hsai1.Init.MckOutput         = SAI_MCK_OUTPUT_ENABLE;
   hsai1.Init.MckOverSampling   = SAI_MCK_OVERSAMPLING_DISABLE;
   hsai1.Init.PdmInit.Activation = DISABLE;
@@ -325,7 +336,10 @@ static void MX_SAI1_Init(void)
   hsai1.SlotInit.SlotNumber     = 2;
   hsai1.SlotInit.SlotActive     = SAI_SLOTACTIVE_0 | SAI_SLOTACTIVE_1;
 
+  g_sai1_kerclk = HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_SAI1);
+
   g_sai1_status = HAL_SAI_Init(&hsai1);
+  g_sai1_mckdiv = hsai1.Init.Mckdiv;
   if (g_sai1_status != HAL_OK)
   {
     return;

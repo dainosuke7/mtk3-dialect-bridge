@@ -115,6 +115,10 @@ extern uint32_t g_mdf1_step;
  * Application/ code goes through audio/mdf_io.c instead. */
 extern DMA_HandleTypeDef hDmaMdf;
 
+/* SAI1の実効出力レート確認用。Fs = g_sai1_kerclk / (g_sai1_mckdiv * 256) */
+extern uint32_t g_sai1_kerclk;
+extern uint32_t g_sai1_mckdiv;
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
