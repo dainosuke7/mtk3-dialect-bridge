@@ -68,7 +68,13 @@ EXPORT ER mdf_in_start_dma(void)
 	dma_cfg.MsbOnly    = DISABLE;
 
 	hal_sts = HAL_MDF_AcqStart_DMA(&hmdf1, &filter_cfg, &dma_cfg);
-	return (hal_sts == HAL_OK) ? E_OK : E_IO;
+	if(hal_sts != HAL_OK) return E_IO;
+
+	/* 飽和/overrun割り込みはHALが勝手に有効化する。今は通知が不要で、
+	 * 大音量時に多発するだけなのでマスクする(飽和はmin/maxで分かる) */
+	hmdf1.Instance->DFLTIER &= ~(MDF_DFLTIER_SATIE | MDF_DFLTIER_RFOVRIE);
+
+	return E_OK;
 }
 
 EXPORT ER mdf_in_stop_dma(void)

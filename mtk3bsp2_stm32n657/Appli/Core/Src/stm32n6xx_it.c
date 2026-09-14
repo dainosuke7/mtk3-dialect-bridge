@@ -260,22 +260,23 @@ void I2C1_ER_IRQHandler(void)
 
 /* USER CODE BEGIN 1 */
 
-/*
- * GPDMA1 Channel 2 (SAI1 Tx DMA). Not CubeMX-generated (SAI1/GPDMA-for-SAI
- * are not in the .ioc); see MX_SAI1_Init() in main.c for the channel setup.
- */
+/* SAI1 Tx DMA。設定は main.c の MX_SAI1_Init() */
 void GPDMA1_Channel2_IRQHandler(void)
 {
   HAL_DMA_IRQHandler(&hDmaSaiTx);
 }
 
-/*
- * GPDMA1 Channel 0 (MDF1 filter0 Rx DMA, onboard PDM mic). Likewise not
- * CubeMX-generated; see MX_MDF1_Init() in main.c for the channel setup.
- */
+/* MDF1 filter0 Rx DMA(オンボードPDMマイク)。設定は main.c の MX_MDF1_Init() */
 void GPDMA1_Channel0_IRQHandler(void)
 {
   HAL_DMA_IRQHandler(&hDmaMdf);
 }
 
+/* MDF1 filter0。HAL_MDF_AcqStart_DMA が飽和/overrun 割り込みを勝手に
+ * 有効化するので、ハンドラが無いと weak の Default_Handler(無限ループ)
+ * に落ちてシステム全体が止まる */
+void MDF1_FLT0_IRQHandler(void)
+{
+  HAL_MDF_IRQHandler(&hmdf1);
+}
 /* USER CODE END 1 */
