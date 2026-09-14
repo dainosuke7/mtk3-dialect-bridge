@@ -7,18 +7,21 @@
 C_SRCS += \
 ../Application/audio/audio_task.c \
 ../Application/audio/mdf_io.c \
+../Application/audio/pcm_fifo.c \
 ../Application/audio/sai_io.c \
 ../Application/audio/wm8904.c 
 
 OBJS += \
 ./Application/audio/audio_task.o \
 ./Application/audio/mdf_io.o \
+./Application/audio/pcm_fifo.o \
 ./Application/audio/sai_io.o \
 ./Application/audio/wm8904.o 
 
 C_DEPS += \
 ./Application/audio/audio_task.d \
 ./Application/audio/mdf_io.d \
+./Application/audio/pcm_fifo.d \
 ./Application/audio/sai_io.d \
 ./Application/audio/wm8904.d 
 
@@ -30,7 +33,7 @@ Application/audio/%.o Application/audio/%.su Application/audio/%.cyclo: ../Appli
 clean: clean-Application-2f-audio
 
 clean-Application-2f-audio:
-	-$(RM) ./Application/audio/audio_task.cyclo ./Application/audio/audio_task.d ./Application/audio/audio_task.o ./Application/audio/audio_task.su ./Application/audio/mdf_io.cyclo ./Application/audio/mdf_io.d ./Application/audio/mdf_io.o ./Application/audio/mdf_io.su ./Application/audio/sai_io.cyclo ./Application/audio/sai_io.d ./Application/audio/sai_io.o ./Application/audio/sai_io.su ./Application/audio/wm8904.cyclo ./Application/audio/wm8904.d ./Application/audio/wm8904.o ./Application/audio/wm8904.su
+	-$(RM) ./Application/audio/audio_task.cyclo ./Application/audio/audio_task.d ./Application/audio/audio_task.o ./Application/audio/audio_task.su ./Application/audio/mdf_io.cyclo ./Application/audio/mdf_io.d ./Application/audio/mdf_io.o ./Application/audio/mdf_io.su ./Application/audio/pcm_fifo.cyclo ./Application/audio/pcm_fifo.d ./Application/audio/pcm_fifo.o ./Application/audio/pcm_fifo.su ./Application/audio/sai_io.cyclo ./Application/audio/sai_io.d ./Application/audio/sai_io.o ./Application/audio/sai_io.su ./Application/audio/wm8904.cyclo ./Application/audio/wm8904.d ./Application/audio/wm8904.o ./Application/audio/wm8904.su
 
 .PHONY: clean-Application-2f-audio
 
