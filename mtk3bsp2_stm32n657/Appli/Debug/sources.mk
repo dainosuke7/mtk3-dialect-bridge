@@ -25,6 +25,7 @@ OBJCOPY_BIN :=
 SUBDIRS := \
 Application/audio \
 Application/fault \
+Application/trace \
 Application \
 Core/Src \
 Core/Startup \

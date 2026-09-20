@@ -8,6 +8,7 @@
 #include "mdf_io.h"
 #include "pcm_fifo.h"
 #include "audio_task.h"
+#include "../trace/trace.h"
 
 LOCAL void task_audio(INT stacd, void *exinf);	// task execution function
 LOCAL ID	tskid_audio;			// Task ID number
@@ -87,6 +88,8 @@ LOCAL void sai_fill_half(H *half)
 {
 	UINT	i, got;
 
+	TRACE(EV_AUD_START, 1);		/* arg=1: 出力側 */
+
 	if(passthrough_active) {
 		/* マイク入力をFIFOから取り出し、モノラル->L/R複製で書き込む */
 		got = pcm_fifo_pop(pt_mono, SAI_HALF_FRAMES);
@@ -95,6 +98,8 @@ LOCAL void sai_fill_half(H *half)
 				pt_mono[i] = 0;		// 不足分は無音で埋める
 			}
 			pt_underrun++;
+			TRACE(EV_UNDERRUN, 0);
+			trace_rate_note_underrun();
 		}
 		for(i = 0; i < SAI_HALF_FRAMES; i++) {
 			half[2*i]     = pt_mono[i];	// L
@@ -105,12 +110,17 @@ LOCAL void sai_fill_half(H *half)
 	}
 
 	SCB_CleanDCache_by_Addr((uint32_t*)half, DMA_HALF_SAMPLES * sizeof(H));
+
+	/* サイン波かパススルーかに関わらず、SAIが消費するレートを数える */
+	trace_rate_add_out(SAI_HALF_FRAMES);
+	TRACE(EV_AUD_END, 1);
 }
 
 /* 前半(dma_buf先頭)の再生完了 = 現在後半を再生中 -> 前半に次データを充填 */
 void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai)
 {
 	if(hsai->Instance == SAI1_Block_A) {
+		TRACE(EV_DMA_OUT_HALF, (UB)dma_half_count);
 		sai_fill_half(&dma_buf[0]);
 		dma_half_count++;
 	}
@@ -120,6 +130,7 @@ void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai)
 void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai)
 {
 	if(hsai->Instance == SAI1_Block_A) {
+		TRACE(EV_DMA_OUT_FULL, (UB)dma_cplt_count);
 		sai_fill_half(&dma_buf[DMA_HALF_SAMPLES]);
 		dma_cplt_count++;
 	}
@@ -162,6 +173,8 @@ LOCAL void mic_process_half(UINT half)
 	UINT	i, pushed;
 	W	v;
 
+	TRACE(EV_AUD_START, 0);		/* arg=0: 入力側 */
+
 	buf = mdf_in_buf_half(half);
 
 	/* DMAがRAMに書いた内容をCPUのキャッシュ越しに読むため、読む直前に
@@ -184,14 +197,22 @@ LOCAL void mic_process_half(UINT half)
 
 	if(fifo_feed_active) {
 		pushed = pcm_fifo_push(mic_mono, MDF_IN_HALF_SAMPLES);
-		if(pushed < MDF_IN_HALF_SAMPLES) pt_overrun++;
+		if(pushed < MDF_IN_HALF_SAMPLES) {
+			pt_overrun++;
+			TRACE(EV_OVERRUN, 0);
+			trace_rate_note_overrun();
+		}
 	}
+
+	trace_rate_add_in(MDF_IN_HALF_SAMPLES);
+	TRACE(EV_AUD_END, 0);
 }
 
 /* 前半の取り込み完了 = 現在後半に書き込み中 -> 前半を処理 */
 void HAL_MDF_AcqHalfCpltCallback(MDF_HandleTypeDef *hmdf)
 {
 	if(hmdf->Instance == MDF1_Filter0) {
+		TRACE(EV_DMA_IN_HALF, (UB)mdf_cb_total);
 		mic_process_half(0);
 	}
 }
@@ -200,6 +221,7 @@ void HAL_MDF_AcqHalfCpltCallback(MDF_HandleTypeDef *hmdf)
 void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
 {
 	if(hmdf->Instance == MDF1_Filter0) {
+		TRACE(EV_DMA_IN_FULL, (UB)mdf_cb_total);
 		mic_process_half(1);
 	}
 }
@@ -305,6 +327,11 @@ LOCAL ER passthrough_test(void)
 		return E_TMOUT;
 	}
 
+	/* ここから計測。FIFO残量の取得だけ audio 側から注入する */
+	trace_ring_reset();
+	trace_enable(TRUE);
+	(void)trace_rate_start(pcm_fifo_count);
+
 	passthrough_active = 1;
 	tm_printf((UB*)"Passthrough ACTIVE (mic -> headphone, prefill=%u samples, mdf_cb=%u)\n",
 			pcm_fifo_count(), mdf_cb_total);
@@ -323,6 +350,9 @@ LOCAL ER passthrough_test(void)
 				pcm_fifo_count(), pt_underrun, pt_overrun, mdf_cb_total, mdf_err_count);
 	}
 
+	trace_rate_stop();
+	trace_enable(FALSE);
+
 	passthrough_active = 0;
 	fifo_feed_active   = 0;
 
@@ -334,6 +364,15 @@ LOCAL ER passthrough_test(void)
 
 	tm_printf((UB*)"Passthrough stopped (sai_cb half=%u cplt=%u, mdf_cb=%u, under=%u over=%u)\n",
 			dma_half_count, dma_cplt_count, mdf_cb_total, mdf_err_count, pt_underrun, pt_overrun);
+
+	/* 溜めたトレースをCSVで吐く。統計はPC側で出す */
+	trace_dump_drain();
+	for(n = 0; n < 300; n++) {		/* 最大30秒待つ */
+		if(!trace_dump_busy()) break;
+		tk_dly_tsk(100);
+	}
+	trace_dump_stop();
+
 	return E_OK;
 }
 
