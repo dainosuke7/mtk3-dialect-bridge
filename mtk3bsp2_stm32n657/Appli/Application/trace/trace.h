@@ -41,10 +41,10 @@ typedef enum {
 	EV_DMA_IN_FULL	= 2,	/* MDF 後半取り込み完了  arg=連番下位8bit */
 	EV_DMA_OUT_HALF	= 3,	/* SAI 前半再生完了      arg=連番下位8bit */
 	EV_DMA_OUT_FULL	= 4,	/* SAI 後半再生完了      arg=連番下位8bit */
-	EV_AUD_START	= 5,	/* 処理開始  arg: 0=入力側 1=出力側 */
-	EV_AUD_END	= 6,	/* 処理終了  arg: 0=入力側 1=出力側 */
-	EV_UNDERRUN	= 7,
-	EV_OVERRUN	= 8,
+	EV_AUD_START	= 5,	/* 処理開始  arg=起床要因ビット(F_*) */
+	EV_AUD_END	= 6,	/* 処理終了  arg=起床要因ビット(F_*) */
+	EV_UNDERRUN	= 7,	/* arg: 0=FIFO不足 1=出力が間に合わず */
+	EV_OVERRUN	= 8,	/* arg: 0=入力側 1=出力側 */
 	EV_INF_START	= 9,	/* Phase 2 */
 	EV_INF_END	= 10,	/* Phase 2 */
 	EV_NOTIFY	= 11,	/* Phase 2 */

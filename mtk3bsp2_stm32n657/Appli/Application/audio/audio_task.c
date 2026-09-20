@@ -64,6 +64,29 @@ LOCAL volatile UW pt_underrun;	// SAI側でFIFOが足りずに無音を埋めた
 LOCAL volatile UW pt_overrun;	// MDF側でFIFOが満杯で捨てた回数
 LOCAL volatile UW mdf_cb_total;	// MDFコールバックの累計回数(リセットしない)
 LOCAL volatile UW mdf_err_count;	// HAL_MDF_ErrorCallback の回数
+LOCAL volatile UW mdf_isr_count;	// MDF割り込みの累計回数(TRACEのarg用)
+LOCAL volatile UW pt_late;	// 1周期分の処理が間に合わなかった回数
+
+/*
+ * DMAコールバックは tk_set_flg でビットを立てるだけにして、変換・リング
+ * 操作・キャッシュ操作は task_pcm で行う。処理をスケジューラ管理下に
+ * 置くことで、Phase 2 でNPU推論を載せたときに優先度で音声を守れる。
+ *
+ * tk_set_flg は CHECK_FLGID しか行わず待ちにも入らないので割り込み
+ * ハンドラから呼べる (mtkernel/kernel/tkernel/eventflag.c:133)。
+ */
+#define F_IN_HALF	(1U << 0)
+#define F_IN_FULL	(1U << 1)
+#define F_OUT_HALF	(1U << 2)
+#define F_OUT_FULL	(1U << 3)
+#define F_ALL		(F_IN_HALF | F_IN_FULL | F_OUT_HALF | F_OUT_FULL)
+
+LOCAL ID	audio_flgid;
+
+LOCAL T_CFLG cflg_audio = {
+	.flgatr		= TA_TFIFO | TA_WMUL,
+	.iflgptn	= 0,
+};
 
 /* SAIコールバック用の作業バッファ。ISRのスタックを消費しないようstatic。
  * SAIの2つのコールバックは同一IRQなので直列化され、共有しても安全。 */
@@ -88,17 +111,15 @@ LOCAL void sai_fill_half(H *half)
 {
 	UINT	i, got;
 
-	TRACE(EV_AUD_START, 1);		/* arg=1: 出力側 */
-
 	if(passthrough_active) {
 		/* マイク入力をFIFOから取り出し、モノラル->L/R複製で書き込む */
 		got = pcm_fifo_pop(pt_mono, SAI_HALF_FRAMES);
 		if(got < SAI_HALF_FRAMES) {
 			for(i = got; i < SAI_HALF_FRAMES; i++) {
-				pt_mono[i] = 0;		// 不足分は無音で埋める
+				pt_mono[i] = 0;		// 不足分は無音で埋めて必ず全体を埋める
 			}
 			pt_underrun++;
-			TRACE(EV_UNDERRUN, 0);
+			TRACE(EV_UNDERRUN, 0);	/* arg=0: FIFO不足 */
 			trace_rate_note_underrun();
 		}
 		for(i = 0; i < SAI_HALF_FRAMES; i++) {
@@ -113,7 +134,6 @@ LOCAL void sai_fill_half(H *half)
 
 	/* サイン波かパススルーかに関わらず、SAIが消費するレートを数える */
 	trace_rate_add_out(SAI_HALF_FRAMES);
-	TRACE(EV_AUD_END, 1);
 }
 
 /* 前半(dma_buf先頭)の再生完了 = 現在後半を再生中 -> 前半に次データを充填 */
@@ -121,8 +141,8 @@ void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai)
 {
 	if(hsai->Instance == SAI1_Block_A) {
 		TRACE(EV_DMA_OUT_HALF, (UB)dma_half_count);
-		sai_fill_half(&dma_buf[0]);
 		dma_half_count++;
+		(void)tk_set_flg(audio_flgid, F_OUT_HALF);
 	}
 }
 
@@ -131,8 +151,8 @@ void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai)
 {
 	if(hsai->Instance == SAI1_Block_A) {
 		TRACE(EV_DMA_OUT_FULL, (UB)dma_cplt_count);
-		sai_fill_half(&dma_buf[DMA_HALF_SAMPLES]);
 		dma_cplt_count++;
+		(void)tk_set_flg(audio_flgid, F_OUT_FULL);
 	}
 }
 
@@ -173,8 +193,6 @@ LOCAL void mic_process_half(UINT half)
 	UINT	i, pushed;
 	W	v;
 
-	TRACE(EV_AUD_START, 0);		/* arg=0: 入力側 */
-
 	buf = mdf_in_buf_half(half);
 
 	/* DMAがRAMに書いた内容をCPUのキャッシュ越しに読むため、読む直前に
@@ -205,15 +223,15 @@ LOCAL void mic_process_half(UINT half)
 	}
 
 	trace_rate_add_in(MDF_IN_HALF_SAMPLES);
-	TRACE(EV_AUD_END, 0);
 }
 
 /* 前半の取り込み完了 = 現在後半に書き込み中 -> 前半を処理 */
 void HAL_MDF_AcqHalfCpltCallback(MDF_HandleTypeDef *hmdf)
 {
 	if(hmdf->Instance == MDF1_Filter0) {
-		TRACE(EV_DMA_IN_HALF, (UB)mdf_cb_total);
-		mic_process_half(0);
+		TRACE(EV_DMA_IN_HALF, (UB)mdf_isr_count);
+		mdf_isr_count++;
+		(void)tk_set_flg(audio_flgid, F_IN_HALF);
 	}
 }
 
@@ -221,8 +239,9 @@ void HAL_MDF_AcqHalfCpltCallback(MDF_HandleTypeDef *hmdf)
 void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
 {
 	if(hmdf->Instance == MDF1_Filter0) {
-		TRACE(EV_DMA_IN_FULL, (UB)mdf_cb_total);
-		mic_process_half(1);
+		TRACE(EV_DMA_IN_FULL, (UB)mdf_isr_count);
+		mdf_isr_count++;
+		(void)tk_set_flg(audio_flgid, F_IN_FULL);
 	}
 }
 
@@ -259,7 +278,95 @@ LOCAL void mic_stat_take(mic_stat_t *out)
 #define PT_BEEP_MS		(1000)
 #define PT_PREFILL_SAMPLES	(800)	// 50ms分たまってから切り替える
 #define PT_REPORT_INTERVAL_MS	(500)
-#define PT_REPORT_COUNT		(30)	// 500ms x 30 = 約15秒
+#define PT_REPORT_COUNT		(1200)	// 500ms x 1200 = 10分
+
+/* ------------------------------------------------------------------ */
+/* 音声処理タスク (DMAコールバックから分離)                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 受け入れ条件4 (優先度が効いていることの確認) 用のスイッチ。
+ * 1 にすると音声タスクを最低優先度に落とし、優先度10の負荷タスクを
+ * 回してアンダーランを誘発する。確認が済んだら 0 に戻すこと。
+ */
+#define AUDIO_PRIO_TEST		(0)
+
+#if AUDIO_PRIO_TEST
+#define AUDIO_PCM_PRI		(32)	/* CNF_MAX_TSKPRI = 最低 */
+#else
+#define AUDIO_PCM_PRI		(5)	/* task_1/2(10) reporter(20) dump(32) より高い */
+#endif
+
+LOCAL void task_pcm(INT stacd, void *exinf);
+LOCAL ID	tskid_pcm;
+LOCAL T_CTSK ctsk_pcm = {
+	.itskpri	= AUDIO_PCM_PRI,
+	/* USE_SPMON が無効でタスク毎MSPLIMが設定されないため、このタスクの
+	 * スタック溢れはフォルト機構では捕まらない。多めに取る */
+	.stksz		= 2048,
+	.task		= task_pcm,
+	.tskatr		= TA_HLNG | TA_RNG3,
+};
+
+LOCAL void task_pcm(INT stacd, void *exinf)
+{
+	UINT	ptn;
+	ER	err;
+
+	while(1) {
+		err = tk_wai_flg(audio_flgid, F_ALL, TWF_ORW | TWF_BITCLR,
+					&ptn, TMO_FEVR);
+		if(err < E_OK) continue;
+
+		/* arg は起床要因のビットパターン。どの処理を行った回かが分かる */
+		TRACE(EV_AUD_START, (UB)ptn);
+
+		/* 同じ側のHALFとFULLが両方立っている = 1回分処理が間に合わなかった */
+		if((ptn & (F_IN_HALF | F_IN_FULL)) == (F_IN_HALF | F_IN_FULL)) {
+			pt_late++;
+			pt_overrun++;
+			TRACE(EV_OVERRUN, 0);		/* arg=0: 入力側 */
+			trace_rate_note_overrun();
+		}
+		if((ptn & (F_OUT_HALF | F_OUT_FULL)) == (F_OUT_HALF | F_OUT_FULL)) {
+			pt_late++;
+			pt_overrun++;
+			TRACE(EV_OVERRUN, 1);		/* arg=1: 出力側 */
+			trace_rate_note_overrun();
+		}
+
+		/* 入力を先に処理してFIFOを埋めてから出力で吸い出す */
+		if((ptn & F_IN_HALF)  != 0) mic_process_half(0);
+		if((ptn & F_IN_FULL)  != 0) mic_process_half(1);
+		if((ptn & F_OUT_HALF) != 0) sai_fill_half(&dma_buf[0]);
+		if((ptn & F_OUT_FULL) != 0) sai_fill_half(&dma_buf[DMA_HALF_SAMPLES]);
+
+		TRACE(EV_AUD_END, (UB)ptn);
+	}
+}
+
+#if AUDIO_PRIO_TEST
+/* 優先度テスト用の負荷。音声タスクより高い優先度でCPUを握り続ける */
+LOCAL void task_load(INT stacd, void *exinf);
+LOCAL ID	tskid_load;
+LOCAL T_CTSK ctsk_load = {
+	.itskpri	= 10,
+	.stksz		= 512,
+	.task		= task_load,
+	.tskatr		= TA_HLNG | TA_RNG3,
+};
+
+LOCAL void task_load(INT stacd, void *exinf)
+{
+	volatile UW	acc = 0;
+	UW		i;
+
+	while(1) {
+		for(i = 0; i < 4000000; i++) acc += i;
+		tk_dly_tsk(1);
+	}
+}
+#endif	/* AUDIO_PRIO_TEST */
 
 LOCAL ER passthrough_test(void)
 {
@@ -275,6 +382,8 @@ LOCAL ER passthrough_test(void)
 	pt_overrun  = 0;
 	mdf_cb_total = 0;
 	mdf_err_count = 0;
+	mdf_isr_count = 0;
+	pt_late = 0;
 	dma_half_count = 0;
 	dma_cplt_count = 0;
 	pcm_fifo_reset();
@@ -344,9 +453,9 @@ LOCAL ER passthrough_test(void)
 			continue;
 		}
 		avg_abs = st.sum_abs / st.samples;
-		tm_printf((UB*)"  pt[%d]: min=%d max=%d avg_abs=%u | fifo=%u under=%u over=%u mdf_cb=%u\n",
+		tm_printf((UB*)"  pt[%d]: min=%d max=%d avg_abs=%u | fifo=%u under=%u over=%u late=%u mdf_cb=%u\n",
 				n, st.min, st.max, avg_abs,
-				pcm_fifo_count(), pt_underrun, pt_overrun, mdf_cb_total, mdf_err_count);
+				pcm_fifo_count(), pt_underrun, pt_overrun, pt_late, mdf_cb_total, mdf_err_count);
 	}
 
 	trace_rate_stop();
@@ -426,6 +535,16 @@ EXPORT BOOL audio_passthrough_active(void)
 
 EXPORT void audio_task_start(void)
 {
+	audio_flgid = tk_cre_flg(&cflg_audio);
+
+	tskid_pcm = tk_cre_tsk(&ctsk_pcm);
+	tk_sta_tsk(tskid_pcm, 0);
+
+#if AUDIO_PRIO_TEST
+	tskid_load = tk_cre_tsk(&ctsk_load);
+	tk_sta_tsk(tskid_load, 0);
+#endif
+
 	tskid_audio = tk_cre_tsk(&ctsk_audio);
 	tk_sta_tsk(tskid_audio, 0);
 }
