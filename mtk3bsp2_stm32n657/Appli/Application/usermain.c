@@ -1,6 +1,7 @@
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include "audio/audio_task.h"
+#include "fault/fault.h"
 
 LOCAL void task_1(INT stacd, void *exinf);	// task execution function
 LOCAL ID	tskid_1;			// Task ID number
@@ -47,7 +48,13 @@ LOCAL void task_2(INT stacd, void *exinf)
 /* usermain関数 */
 EXPORT INT usermain(void)
 {
+	/* 何よりも先に。以降のフォルト・未実装IRQはUARTに出てから止まる */
+	app_fault_init();
+
 	tm_putstring((UB*)"Start User-main program.\n");
+
+	/* 受け入れテスト (fault.h の FAULT_TEST)。1〜4なら戻ってこない */
+	fault_test_run();
 
 	/* Create & Start Tasks */
 	tskid_1 = tk_cre_tsk(&ctsk_1);
