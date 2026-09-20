@@ -24,6 +24,7 @@ OBJCOPY_BIN :=
 # Every subdirectory with source files must be described here
 SUBDIRS := \
 Application/audio \
+Application/fault \
 Application \
 Core/Src \
 Core/Startup \
