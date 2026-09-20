@@ -8,13 +8,9 @@
 /* 実効レートの母数                                                   */
 /* ---------------------------------------------------------------- */
 
-/*
- * DMAコールバック(割り込み)から加算し、周期ハンドラで差分を取る。
- * いずれも自然境界に載った32bit変数なので、Cortex-M では単独の
- * load/store がアトミックになる。読み側で DI/EI は要らない。
- */
-LOCAL volatile UW	rate_in_samples;	/* MDFが取り込んだ累計サンプル数 */
-LOCAL volatile UW	rate_out_samples;	/* SAIへ送った累計サンプル数 */
+/* 自然境界の32bit変数なので単独のload/storeはアトミック。読み側のDI/EI不要 */
+LOCAL volatile UW	rate_in_samples;
+LOCAL volatile UW	rate_out_samples;
 LOCAL volatile UW	rate_underrun;
 LOCAL volatile UW	rate_overrun;
 
@@ -27,23 +23,13 @@ EXPORT void trace_rate_note_overrun(void)	{ rate_overrun++; }
 /* 周期ハンドラ -> レポータタスク                                     */
 /* ---------------------------------------------------------------- */
 
-/*
- * 周期ハンドラの中では値の取得だけを行い、tm_printf はタスクに回す。
- * 周期ハンドラ内で重い処理をすると、測ろうとしている当のタイミングを
- * 乱してしまうため。
- *
- * 受け渡しは CLAUDE.md の規約どおりメッセージバッファを使う。
- * tk_snd_mbf は in_indp() を明示的に扱っており、TMO_POL なら
- * タスク独立部から呼べる (mtkernel/kernel/tkernel/messagebuf.c:314)。
- */
 typedef struct {
-	UW	d_in;		/* この周期で入力したサンプル数 */
-	UW	d_out;		/* この周期で出力したサンプル数 */
-	UW	d_cyc;		/* この周期の実測経過サイクル数 */
-	UW	ring;		/* FIFO残量 */
+	UW	d_in;
+	UW	d_out;
+	UW	d_cyc;
+	UW	ring;
 	UW	under;
 	UW	over;
-	UW	drop;		/* トレース取りこぼし累計 */
 } rate_rec_t;
 
 #define RATE_PERIOD_MS	(1000)
@@ -54,13 +40,13 @@ LOCAL ID	tskid_report = 0;
 LOCAL ID	tskid_dump   = 0;
 LOCAL ID	uart_mtxid   = 0;
 
-LOCAL UINT	(*rate_ring_level)(void);	/* FIFO残量の取得(注入) */
+LOCAL UINT	(*rate_ring_level)(void);
 
-/* 前回スナップショット */
 LOCAL UW	prev_in;
 LOCAL UW	prev_out;
 LOCAL UW	prev_t;
 
+/* 周期ハンドラ内は引き算だけ。Hz換算と表示はタスクに回す */
 LOCAL void rate_cychdr(void *exinf)
 {
 	rate_rec_t	rec;
@@ -70,22 +56,17 @@ LOCAL void rate_cychdr(void *exinf)
 	now_out = rate_out_samples;
 	now_t   = NOW();
 
-	/* ここでは引き算だけ。Hzへの換算(64bit除算)はタスク側に回す。
-	 * 経過時間は tk_get_otm(ms) ではなく DWT の実測サイクル数で持つ
-	 * (CLAUDE.md の規約。周期ハンドラの起動ゆらぎもこれで吸収される) */
 	rec.d_in  = (UW)(now_in  - prev_in);
 	rec.d_out = (UW)(now_out - prev_out);
 	rec.d_cyc = (UW)(now_t   - prev_t);
 	rec.ring  = (rate_ring_level != NULL) ? (UW)rate_ring_level() : 0;
 	rec.under = rate_underrun;
 	rec.over  = rate_overrun;
-	rec.drop  = trace_dropped();
 
 	prev_in  = now_in;
 	prev_out = now_out;
 	prev_t   = now_t;
 
-	/* 溜まっていたら捨てる。計測を止めてまで送る価値はない */
 	(void)tk_snd_mbf(rate_mbfid, &rec, sizeof(rec), TMO_POL);
 }
 
@@ -93,12 +74,6 @@ LOCAL void rate_cychdr(void *exinf)
 /* UART出力の直列化                                                   */
 /* ---------------------------------------------------------------- */
 
-/*
- * レポータ(優先度20)とダンプ(優先度32)が同時に tm_printf すると行が
- * 混ざるため mutex で囲む。CLAUDE.md の規約どおり優先度継承付き。
- * なお audio_task 等の既存の tm_printf はこの mutex を通らないので、
- * そちらとは依然として混ざりうる。
- */
 LOCAL void uart_lock(void)
 {
 	if(uart_mtxid > 0) (void)tk_loc_mtx(uart_mtxid, TMO_FEVR);
@@ -110,7 +85,7 @@ LOCAL void uart_unlock(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* レポータタスク                                                     */
+/* レポータタスク (優先度20)                                          */
 /* ---------------------------------------------------------------- */
 
 LOCAL void task_report(INT stacd, void *exinf)
@@ -123,8 +98,9 @@ LOCAL void task_report(INT stacd, void *exinf)
 		sz = tk_rcv_mbf(rate_mbfid, &rec, TMO_FEVR);
 		if(sz < (INT)sizeof(rec)) continue;
 
-		/* 実効レート = サンプル数 / 実測経過時間。分母は周期ハンドラが
-		 * DWT で測った値なので、起動ゆらぎがあっても正しく出る */
+		/* ダンプ中は黙る。CSVに混ざるのを防ぐ */
+		if(trace_muted()) continue;
+
 		dt_us = trace_cyc_to_us(rec.d_cyc);
 		if(dt_us == 0) {
 			in_hz  = 0;
@@ -135,100 +111,153 @@ LOCAL void task_report(INT stacd, void *exinf)
 		}
 
 		uart_lock();
-		tm_printf((UB*)"in=%uHz out=%uHz ring=%u under=%u over=%u",
-				in_hz, out_hz, rec.ring, rec.under, rec.over);
-		if(rec.drop != 0) tm_printf((UB*)" tracedrop=%u", rec.drop);
-		tm_printf((UB*)" (dt=%uus)\n", dt_us);
+		tm_printf((UB*)"in=%uHz out=%uHz ring=%u under=%u over=%u (dt=%uus)\n",
+				in_hz, out_hz, rec.ring, rec.under, rec.over, dt_us);
 		uart_unlock();
 	}
 }
 
 /* ---------------------------------------------------------------- */
-/* ダンプタスク (最低優先度)                                          */
+/* ダンプタスク (優先度32 = 最低)。状態機械の駆動も担当               */
 /* ---------------------------------------------------------------- */
 
-LOCAL volatile BOOL	dump_req;	/* 1でダンプ中 */
-LOCAL volatile BOOL	dump_header;	/* ヘッダ未出力 */
-LOCAL volatile BOOL	dump_drain;	/* 1なら吐き切った時点で自動停止 */
-
-/* 1回のロック保持で出す件数。115200bpsだと1行約18文字=1.6msなので
- * 16行で約25ms。ここを大きくするとレポータの1秒行がその分遅れる */
 #define DUMP_CHUNK	(16)
+#define POLL_MS		(20)
+
+/* 記録中の経過監視。書くのはこのタスクだけなので排他不要 */
+LOCAL uint64_t	rec_elapsed;
+LOCAL UW	rec_prev;
+LOCAL BOOL	rec_armed;
+
+/*
+ * 32bit CYCCNT の差分。生値は約7.16秒(600MHz)で折り返すので、必ず
+ * これを通して64bitに積み上げる。逆転(並びの前後)は0とみなす。
+ */
+LOCAL UW cyc_delta(UW now, UW prev)
+{
+	UW	d = (UW)(now - prev);
+
+	return (d & 0x80000000UL) ? 0 : d;
+}
+
+LOCAL void record_watch(void)
+{
+	UW		now = NOW();
+	uint64_t	dur_cyc;
+
+	if(!rec_armed) {
+		rec_armed   = TRUE;
+		rec_elapsed = 0;
+		rec_prev    = now;
+		return;
+	}
+	rec_elapsed += (uint64_t)cyc_delta(now, rec_prev);
+	rec_prev     = now;
+
+	dur_cyc = (uint64_t)trace_duration_ms() * (uint64_t)trace_core_clock() / 1000ULL;
+	if(dur_cyc != 0 && rec_elapsed >= dur_cyc) {
+		trace_stop_with(TRACE_STOP_TIME);
+	}
+}
+
+/* 最初と最後のタイムスタンプの差 */
+LOCAL UW recorded_span_us(void)
+{
+	const trace_ent_t	*e;
+	UW			n = trace_count(), i, prev;
+	uint64_t		acc = 0;
+
+	if(n < 2 || trace_core_clock() == 0) return 0;
+
+	e    = trace_ring_entry(0);
+	prev = e->t;
+	for(i = 1; i < n; i++) {
+		e = trace_ring_entry(i);
+		acc += (uint64_t)cyc_delta(e->t, prev);
+		prev = e->t;
+	}
+	return (UW)((acc * 1000000ULL) / (uint64_t)trace_core_clock());
+}
+
+LOCAL const char *reason_name(void)
+{
+	switch(trace_stop_reason()) {
+	case TRACE_STOP_TIME: return "time";
+	case TRACE_STOP_FULL: return "ring-full";
+	default:              return "manual";
+	}
+}
+
+LOCAL void dump_all(void)
+{
+	const trace_ent_t	*e;
+	UW			n, i, prev, span_us, t_us, clk;
+	uint64_t		acc;
+	UINT			c;
+
+	n       = trace_count();
+	clk     = trace_core_clock();
+	span_us = recorded_span_us();
+
+	uart_lock();
+	tm_printf((UB*)"#trace begin clk=%uHz entries=%u span_us=%u stop=%s\n",
+			clk, n, span_us, reason_name());
+	if(trace_dropped() != 0) {
+		tm_printf((UB*)"#trace ***********************************************\n");
+		tm_printf((UB*)"#trace *** WARNING: ring overflow, dropped=%u ***\n",
+				trace_dropped());
+		tm_printf((UB*)"#trace ***********************************************\n");
+	}
+	tm_printf((UB*)"t_us,id,arg\n");
+	uart_unlock();
+
+	/* t_us は先頭0からの単調増加。生値の折り返しはここで吸収する */
+	acc  = 0;
+	prev = 0;
+	i    = 0;
+	while(i < n) {
+		uart_lock();
+		for(c = 0; c < DUMP_CHUNK && i < n; c++, i++) {
+			e = trace_ring_entry(i);
+			if(e == NULL) break;
+			if(i == 0) prev = e->t;
+			acc += (uint64_t)cyc_delta(e->t, prev);
+			prev = e->t;
+			t_us = (clk != 0) ? (UW)((acc * 1000000ULL) / (uint64_t)clk) : 0;
+			tm_printf((UB*)"%u,%u,%u\n", t_us, (UW)e->id, (UW)e->arg);
+		}
+		uart_unlock();
+		tk_dly_tsk(1);
+	}
+
+	uart_lock();
+	tm_printf((UB*)"#trace end dropped=%u muted=%u\n",
+			trace_dropped(), trace_muted_count());
+	uart_unlock();
+}
 
 LOCAL void task_dump(INT stacd, void *exinf)
 {
-	trace_ent_t	e;
-	UINT		n;
-
 	while(1) {
-		if(!dump_req) {
-			tk_dly_tsk(50);
-			continue;
-		}
+		switch(trace_state()) {
+		case TRACE_RECORDING:
+			record_watch();
+			tk_dly_tsk(POLL_MS);
+			break;
 
-		if(dump_header) {
-			uart_lock();
-			/* t_us は CYCCNT を変換した値なので wrap_us で折り返す。
-			 * PC側はこれを使って巻き戻りを検出すること */
-			tm_printf((UB*)"#trace begin clk=%uHz wrap_us=%u\n",
-					trace_core_clock(), trace_cyc_to_us(0xFFFFFFFFUL));
-			tm_printf((UB*)"t_us,id,arg\n");
-			uart_unlock();
-			dump_header = FALSE;
-		}
+		case TRACE_FULL:
+			rec_armed = FALSE;
+			trace_set_state(TRACE_DUMPING);
+			dump_all();
+			trace_set_state(TRACE_IDLE);
+			break;
 
-		if(trace_ring_pending() == 0) {
-			if(dump_drain) {
-				dump_drain = FALSE;
-				dump_req   = FALSE;
-				uart_lock();
-				tm_printf((UB*)"#trace end dropped=%u\n", trace_dropped());
-				uart_unlock();
-				continue;
-			}
-			tk_dly_tsk(20);
-			continue;
+		default:
+			rec_armed = FALSE;
+			tk_dly_tsk(POLL_MS * 5);
+			break;
 		}
-
-		uart_lock();
-		for(n = 0; n < DUMP_CHUNK; n++) {
-			if(!trace_ring_get(&e)) break;
-			/* ボード上では統計を出さない。生データのまま流す */
-			tm_printf((UB*)"%u,%u,%u\n",
-					trace_cyc_to_us(e.t), (UW)e.id, (UW)e.arg);
-		}
-		uart_unlock();
-
-		/* 他タスクに譲る。最低優先度なので本来不要だが、
-		 * 同優先度が増えたときのために明示しておく */
-		tk_dly_tsk(1);
 	}
-}
-
-EXPORT void trace_dump_start(void)
-{
-	dump_header = TRUE;
-	dump_drain  = FALSE;
-	dump_req    = TRUE;
-}
-
-/* 残っている分を吐き切ったら自動で止まる。記録を止めてから呼ぶこと */
-EXPORT void trace_dump_drain(void)
-{
-	dump_header = TRUE;
-	dump_drain  = TRUE;
-	dump_req    = TRUE;
-}
-
-EXPORT BOOL trace_dump_busy(void)
-{
-	return dump_req;
-}
-
-EXPORT void trace_dump_stop(void)
-{
-	dump_req   = FALSE;
-	dump_drain = FALSE;
 }
 
 /* ---------------------------------------------------------------- */
@@ -236,7 +265,7 @@ EXPORT void trace_dump_stop(void)
 /* ---------------------------------------------------------------- */
 
 LOCAL T_CMTX cmtx_uart = {
-	.mtxatr	 = TA_TFIFO | TA_INHERIT,	/* 優先度継承 (CLAUDE.md) */
+	.mtxatr	 = TA_TFIFO | TA_INHERIT,
 	.ceilpri = 0,
 };
 
@@ -247,14 +276,14 @@ LOCAL T_CMBF cmbf_rate = {
 };
 
 LOCAL T_CTSK ctsk_report = {
-	.itskpri = 20,			/* audio(10) より下、dump より上 */
+	.itskpri = 20,
 	.stksz	 = 1024,
 	.task	 = task_report,
 	.tskatr	 = TA_HLNG | TA_RNG3,
 };
 
 LOCAL T_CTSK ctsk_dump = {
-	.itskpri = 32,			/* CNF_MAX_TSKPRI = 最低優先度 */
+	.itskpri = 32,			/* CNF_MAX_TSKPRI */
 	.stksz	 = 1024,
 	.task	 = task_dump,
 	.tskatr	 = TA_HLNG | TA_RNG3,

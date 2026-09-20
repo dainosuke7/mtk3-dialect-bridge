@@ -4,17 +4,21 @@
 #include <tk/tkernel.h>
 #include "trace.h"
 
-/*
- * リングのダンプ側インタフェース (trace内部用)。
- * 記録側 (trace_put / trace_enable / trace_ring_reset / trace_dropped) は
- * trace.h に公開してある。
- */
+/* ダンプ側インタフェース (trace内部用)。記録側は trace.h にある */
 
-/* 未ダンプのエントリを1件取り出す。取れたら TRUE。
- * 一周されて失われた分があれば trace_drop に加算して読み飛ばす */
-EXPORT BOOL trace_ring_get(trace_ent_t *out);
+/* idx 番目のエントリ。idx < trace_count() であること */
+EXPORT const trace_ent_t *trace_ring_entry(UW idx);
 
-/* 未ダンプ件数 (上書きで失われた分は含まない) */
-EXPORT UW trace_ring_pending(void);
+/* 状態遷移。ダンプタスクだけが呼ぶ */
+EXPORT void trace_set_state(trace_state_t st);
+
+/* 理由を指定して記録を打ち切る */
+EXPORT void trace_stop_with(UINT reason);
+
+/* 直近の停止理由 (TRACE_STOP_*) */
+EXPORT UINT trace_stop_reason(void);
+
+/* trace_start() で指定された記録時間 (サイクル換算) */
+EXPORT UW trace_duration_ms(void);
 
 #endif	/* TRACE_RING_H */

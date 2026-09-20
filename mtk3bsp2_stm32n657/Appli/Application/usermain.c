@@ -4,6 +4,9 @@
 #include "fault/fault.h"
 #include "trace/trace.h"
 
+#define TRACE_WINDOW_MS		(10000)	/* 記録する区間の長さ */
+#define TRACE_WAIT_POLL		(100)	/* パススルー待ちの上限 (x100ms) */
+
 LOCAL void task_1(INT stacd, void *exinf);	// task execution function
 LOCAL ID	tskid_1;			// Task ID number
 LOCAL T_CTSK ctsk_1 = {				// Task creation information
@@ -25,7 +28,7 @@ LOCAL T_CTSK ctsk_2 = {				// Task creation information
 LOCAL void task_1(INT stacd, void *exinf)
 {
 	while(1) {
-		tm_printf((UB*)"task 1\n");
+		if(!trace_muted()) tm_printf((UB*)"task 1\n");
 
 		/* Inverts the LED on the board. */
 		out_w(GPIO_ODR(O), (in_w(GPIO_ODR(O)))^(1<<1));
@@ -37,7 +40,7 @@ LOCAL void task_1(INT stacd, void *exinf)
 LOCAL void task_2(INT stacd, void *exinf)
 {
 	while(1) {
-		tm_printf((UB*)"task 2\n");
+		if(!trace_muted()) tm_printf((UB*)"task 2\n");
 
 		/* Inverts the LED on the board. */
 		out_w(GPIO_ODR(G), (in_w(GPIO_ODR(G)))^(1<<10));
@@ -49,6 +52,8 @@ LOCAL void task_2(INT stacd, void *exinf)
 /* usermain関数 */
 EXPORT INT usermain(void)
 {
+	INT	i;
+
 	/* 何よりも先に。以降のフォルト・未実装IRQはUARTに出てから止まる */
 	app_fault_init();
 
@@ -74,6 +79,19 @@ EXPORT INT usermain(void)
 	}
 
 	audio_task_start();
+
+	/* ---- 計測したい区間はここ ----
+	 * パススルーが立ち上がるのを待ってから10秒間だけ記録する。
+	 * 記録は時間経過かリング満杯で自動停止し、そのままCSVダンプに移る。 */
+	for(i = 0; i < TRACE_WAIT_POLL; i++) {
+		if(audio_passthrough_active()) break;
+		tk_dly_tsk(100);
+	}
+	if(audio_passthrough_active()) {
+		trace_start(TRACE_WINDOW_MS);
+	} else {
+		tm_printf((UB*)"trace: passthrough did not start, skip\n");
+	}
 
 	tk_slp_tsk(TMO_FEVR);
 

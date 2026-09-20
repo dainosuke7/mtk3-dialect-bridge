@@ -1,112 +1,111 @@
 #include <tk/tkernel.h>
-#include "main.h"	// CMSIS (__DMB)
+#include "main.h"
 #include "trace.h"
-
-#define TRACE_RING_MASK		(TRACE_RING_ENTRIES - 1)
+#include "trace_ring.h"
 
 LOCAL trace_ent_t	trace_ring[TRACE_RING_ENTRIES];
 
 /*
- * head は累計イベント数として単調増加させ、実インデックスはマスクで求める
- * (pcm_fifo.c と同じ方式)。こうすると head - tail が折り返しをまたいでも
- * 正しく件数になる。
+ * 区間記録なので折り返さない。満杯になった時点で記録を止めるため、
+ * head はそのまま件数になり、マスクも不要。
  */
-LOCAL volatile UW	trace_head;	/* 記録側が進める */
-LOCAL volatile UW	trace_tail;	/* ダンプ側が進める */
-LOCAL volatile UW	trace_drop;	/* 上書きで失った件数 */
-LOCAL volatile BOOL	trace_rec_on;
+LOCAL volatile UW		trace_head;
+LOCAL volatile UW		trace_drop;
+LOCAL volatile trace_state_t	trace_st = TRACE_IDLE;
+LOCAL volatile UINT		trace_reason = TRACE_STOP_MANUAL;
+LOCAL volatile UW		trace_dur_ms;
+LOCAL volatile UW		trace_muted_n;
 
-EXPORT void trace_enable(BOOL on)
+EXPORT trace_state_t trace_state(void)	{ return trace_st; }
+EXPORT UW trace_count(void)		{ return trace_head; }
+EXPORT UW trace_dropped(void)		{ return trace_drop; }
+EXPORT UINT trace_stop_reason(void)	{ return trace_reason; }
+EXPORT UW trace_duration_ms(void)	{ return trace_dur_ms; }
+EXPORT UW trace_muted_count(void)	{ return trace_muted_n; }
+
+EXPORT BOOL trace_busy(void)
 {
-	trace_rec_on = on;
+	return (trace_st == TRACE_RECORDING || trace_st == TRACE_DUMPING) ? TRUE : FALSE;
 }
 
-EXPORT void trace_ring_reset(void)
+EXPORT BOOL trace_muted(void)
+{
+	if(trace_st != TRACE_DUMPING) return FALSE;
+	trace_muted_n++;
+	return TRUE;
+}
+
+EXPORT void trace_set_state(trace_state_t st)
+{
+	trace_st = st;
+}
+
+EXPORT void trace_start(UW duration_ms)
 {
 	UW	imask;
 
 	DI(imask);
-	trace_head = 0;
-	trace_tail = 0;
-	trace_drop = 0;
+	trace_head    = 0;
+	trace_drop    = 0;
+	trace_muted_n = 0;
+	trace_dur_ms  = duration_ms;
+	trace_reason  = TRACE_STOP_MANUAL;
+	trace_st      = TRACE_RECORDING;
 	EI(imask);
 }
 
-EXPORT UW trace_dropped(void)
+EXPORT void trace_stop_with(UINT reason)
 {
-	return trace_drop;
+	if(trace_st == TRACE_RECORDING) {
+		trace_reason = reason;
+		trace_st     = TRACE_FULL;
+	}
+}
+
+EXPORT void trace_stop(void)
+{
+	trace_stop_with(TRACE_STOP_MANUAL);
 }
 
 /*
- * イベントを1件記録する。
- *
  * 時刻は DI の前に読む。TRACE() が呼ばれた瞬間に最も近い値にしたいため。
- * この結果、割り込みに割り込まれるとリング上の並びが時刻順にならない
- * ことがあるが、解析はPC側なので t でソートすればよい。
- * 順序より「その時刻が正確であること」を優先している。
- *
- * 割り込み禁止区間は head の取得と進行だけ。エントリへの書き込みは
- * 区間の外で行う (8バイトのstoreを禁止区間に入れない)。
+ * 並びが時刻順にならないことがあるが、解析はPC側で t を見ればよい。
+ * 割り込み禁止区間は head の取得と進行だけ。
  */
 EXPORT void trace_put(UB id, UB arg)
 {
 	UW		t, imask, idx;
 	trace_ent_t	*e;
 
-	if(!trace_rec_on) return;
+	if(trace_st != TRACE_RECORDING) return;
 
 	t = NOW();
 
 	DI(imask);
-	idx = trace_head++;
+	idx = trace_head;
+	if(idx < TRACE_RING_ENTRIES) trace_head = idx + 1;
 	EI(imask);
 
-	e = &trace_ring[idx & TRACE_RING_MASK];
+	if(idx >= TRACE_RING_ENTRIES) {
+		trace_reason = TRACE_STOP_FULL;
+		trace_st     = TRACE_FULL;
+		return;
+	}
+
+	e = &trace_ring[idx];
 	e->t   = t;
 	e->id  = id;
 	e->arg = arg;
 	e->pad = 0;
-}
 
-/* ---------------------------------------------------------------- */
-/* ダンプ側                                                           */
-/* ---------------------------------------------------------------- */
-
-/*
- * 未ダンプのエントリを1件取り出す。取れたら TRUE。
- *
- * ダンプが記録に追いつかれてリングを一周されていた場合、失われた分を
- * trace_drop に足して tail を有効範囲の先頭まで進める。
- */
-EXPORT BOOL trace_ring_get(trace_ent_t *out)
-{
-	UW	head, tail, avail;
-
-	head = trace_head;
-	tail = trace_tail;
-	avail = head - tail;
-
-	if(avail == 0) return FALSE;
-
-	if(avail > TRACE_RING_ENTRIES) {
-		/* 一周されて古い分が上書きされている */
-		UW lost = avail - TRACE_RING_ENTRIES;
-		trace_drop += lost;
-		tail += lost;
+	if(idx == (TRACE_RING_ENTRIES - 1)) {
+		trace_reason = TRACE_STOP_FULL;
+		trace_st     = TRACE_FULL;
 	}
-
-	*out = trace_ring[tail & TRACE_RING_MASK];
-
-	__DMB();
-	trace_tail = tail + 1;
-
-	return TRUE;
 }
 
-/* 未ダンプ件数 (上書きされた分は含まない) */
-EXPORT UW trace_ring_pending(void)
+EXPORT const trace_ent_t *trace_ring_entry(UW idx)
 {
-	UW	avail = trace_head - trace_tail;
-
-	return (avail > TRACE_RING_ENTRIES) ? TRACE_RING_ENTRIES : avail;
+	if(idx >= trace_head) return NULL;
+	return &trace_ring[idx];
 }

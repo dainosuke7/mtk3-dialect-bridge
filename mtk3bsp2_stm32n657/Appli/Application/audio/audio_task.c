@@ -327,9 +327,7 @@ LOCAL ER passthrough_test(void)
 		return E_TMOUT;
 	}
 
-	/* ここから計測。FIFO残量の取得だけ audio 側から注入する */
-	trace_ring_reset();
-	trace_enable(TRUE);
+	/* 実効レートの1秒表示のみここで開始する (トレース記録は usermain) */
 	(void)trace_rate_start(pcm_fifo_count);
 
 	passthrough_active = 1;
@@ -340,6 +338,7 @@ LOCAL ER passthrough_test(void)
 	for(n = 0; n < PT_REPORT_COUNT; n++) {
 		tk_dly_tsk(PT_REPORT_INTERVAL_MS);
 		mic_stat_take(&st);
+		if(trace_muted()) continue;		/* ダンプ中は黙る */
 		if(st.samples == 0) {
 			tm_printf((UB*)"  pt[%d]: no mic data (mdf_cb=%u)\n", n, mdf_cb_total);
 			continue;
@@ -351,7 +350,6 @@ LOCAL ER passthrough_test(void)
 	}
 
 	trace_rate_stop();
-	trace_enable(FALSE);
 
 	passthrough_active = 0;
 	fifo_feed_active   = 0;
@@ -364,14 +362,6 @@ LOCAL ER passthrough_test(void)
 
 	tm_printf((UB*)"Passthrough stopped (sai_cb half=%u cplt=%u, mdf_cb=%u, under=%u over=%u)\n",
 			dma_half_count, dma_cplt_count, mdf_cb_total, mdf_err_count, pt_underrun, pt_overrun);
-
-	/* 溜めたトレースをCSVで吐く。統計はPC側で出す */
-	trace_dump_drain();
-	for(n = 0; n < 300; n++) {		/* 最大30秒待つ */
-		if(!trace_dump_busy()) break;
-		tk_dly_tsk(100);
-	}
-	trace_dump_stop();
 
 	return E_OK;
 }
@@ -427,6 +417,11 @@ LOCAL void task_audio(INT stacd, void *exinf)
 	} while(0);
 
 	tk_ext_tsk();
+}
+
+EXPORT BOOL audio_passthrough_active(void)
+{
+	return passthrough_active ? TRUE : FALSE;
 }
 
 EXPORT void audio_task_start(void)
