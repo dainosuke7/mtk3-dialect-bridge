@@ -87,7 +87,7 @@
 		<link>
 			<name>Drivers/STM32N6xx_HAL_Driver/stm32n6xx_hal_mdf.c</name>
 			<type>1</type>
-			<location>C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_mdf.c</location>
+			<locationURI>PARENT-1-PROJECT_LOC/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_mdf.c</locationURI>
 		</link>
 		<link>
 			<name>Drivers/STM32N6xx_HAL_Driver/stm32n6xx_hal_pwr.c</name>
@@ -112,12 +112,12 @@
 		<link>
 			<name>Drivers/STM32N6xx_HAL_Driver/stm32n6xx_hal_sai.c</name>
 			<type>1</type>
-			<location>C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_sai.c</location>
+			<locationURI>PARENT-1-PROJECT_LOC/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_sai.c</locationURI>
 		</link>
 		<link>
 			<name>Drivers/STM32N6xx_HAL_Driver/stm32n6xx_hal_sai_ex.c</name>
 			<type>1</type>
-			<location>C:/Users/daich/work/tron/mtk3bsp2_stm32n657/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_sai_ex.c</location>
+			<locationURI>PARENT-1-PROJECT_LOC/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_sai_ex.c</locationURI>
 		</link>
 		<link>
 			<name>Drivers/STM32N6xx_HAL_Driver/stm32n6xx_hal_tim.c</name>
@@ -128,6 +128,11 @@
 			<name>Drivers/STM32N6xx_HAL_Driver/stm32n6xx_hal_tim_ex.c</name>
 			<type>1</type>
 			<locationURI>PARENT-1-PROJECT_LOC/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_tim_ex.c</locationURI>
+		</link>
+		<link>
+			<name>Drivers/STM32N6xx_HAL_Driver/stm32n6xx_hal_xspi.c</name>
+			<type>1</type>
+			<locationURI>PARENT-1-PROJECT_LOC/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_xspi.c</locationURI>
 		</link>
 		<link>
 			<name>Drivers/STM32N6xx_HAL_Driver/stm32n6xx_ll_exti.c</name>
