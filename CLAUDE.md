@@ -11,7 +11,7 @@ TRONプログラミングコンテスト2026 — 屋内音お知らせ機
 例外として変更した場所（増やしたら必ずここに追記する）
 場所	内容	理由
 Appli/Core/Src/main.c	MX_I2C2_Init, MX_SAI1_Init, MX_MDF1_Init, MPU_Config を追加	音声経路（WM8904制御・SAI出力・PDM入力）に必要
-FSBL/Core/Src/main.c（USER CODE 区画内）	Debug 経路で JumpToApplication() の直前に外部フラッシュのメモリマップを有効化	Debug 起動では BOOT_Application() を通らず XSPI2 がマップされない。重み(0x70180000)を読むために必要。Release 経路は元から同じ処理をしている
+Appli/Core/Inc/stm32n6xx_hal_conf.h	HAL_XSPI_MODULE_ENABLED を有効化。Appli/.project に stm32n6xx_hal_xspi.c の link を追加	アプリ側で XSPI2 を初期化して外部フラッシュをメモリマップする（Application/extflash/）ため
 Appli/Core/Inc/stm32n6xx_hal_conf.h	（予定）HAL_RAMCFG / HAL_CACHEAXI / HAL_RIF の MODULE_ENABLED	NPU 用 AXISRAM3〜6 と NPU キャッシュ・RIF 設定に必要
 変更は可能な限り USER CODE BEGIN/END 区画の中に書く（CubeMX 再生成で消えない）
 コマンド
@@ -69,18 +69,21 @@ FAULT_TEST（fault.h）: 0=無効 / 1=BusFault / 2=ゼロ除算 / 3=未実装IRQ
 テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す
 既知の罠
 tm_printf はカーネル起動前（knl_start_mtkernel より前）に使えない。 起動前の初期化関数は Error_Handler() を呼ばず、結果を変数に記録してカーネル起動まで到達させる
-FSBL がペリフェラルを触った状態でアプリが起動する。 HAL_xxx_Init が HAL_ERROR を返したら __HAL_RCC_xxx_FORCE_RESET()/RELEASE_RESET() で戻してから初期化（MDF1 で発生）
+FSBL がペリフェラルを触った状態でアプリが起動する。 HAL_xxx_Init が HAL_ERROR を返したら __HAL_RCC_xxx_FORCE_RESET()/RELEASE_RESET() で戻してから初期化（MDF1 で発生。XSPI2 は最初からリセットしてから初期化している）
+カーネル起動後は SysTick がカーネル（knl_systim_inthdr）に渡り HAL_IncTick() が呼ばれない。 そのままだと HAL_GetTick() が止まり、HAL のタイムアウトが効かない（失敗時に永久待ち）・HAL_Delay() が戻らない。 usermain の周期ハンドラ（10ms ごとに HAL_IncTick() を10回）で補っている。カーネル起動後に HAL のタイムアウト付き API を使うのはこれを起動してから。 分解能は 10ms なので、タイムアウトが 10ms 未満の HAL 待ち（RCC の PLL/HSI 起動 1ms など）をカーネル起動後に呼ぶと誤タイムアウトし得る。PLL の設定はカーネル起動前（main.c）で行う
 STM32N6 に DMA_CIRCULAR は無い。 循環DMAは HAL_DMAEx_List_* で組み、ノードは .noncacheable に置く
 キャッシュ: CPU が書いて DMA が読む前は SCB_CleanDCache_by_Addr、DMA が書いて CPU が読む前は SCB_InvalidateDCache_by_Addr
 割り込みを有効化したらハンドラを必ず用意する。 HAL_MDF_AcqStart_DMA は飽和/overrun 割り込みを自動で有効化する
-外部フラッシュは Debug 起動ではメモリマップされていない（FSBL 例外変更で対処）
+BSP2 FSBL の EXTMEM(SFDP) 初期化はこのボードで失敗している (SFDP ヘッダ読み出しでタイムアウト、ManuID=0。IR=0x5A のまま SR.BUSY が残る)。FSBL は XSPI2 のカーネルクロックに HCLK を選んでおり、アプリで HCLK を選んだときと同じ症状なので、原因も同じと見ている (FSBL 側は未検証)。Debug 起動では問題にならないが、外部フラッシュをアプリから読むにはアプリ側で XSPI2 を初期化する必要がある
+外部フラッシュ（MX66UW1G45G）は Application/extflash/ で DTR-OPI メモリマップにする。 OTP の HSLV_VDDIO3 を焼いていないので ST 版の 200MHz は使わない。 SCLK = IC3 200MHz（PLL1 1200MHz / 6）/ (EXTFLASH_PRESCALER + 1) = 50MHz。fuse_vddio() は移植しない
+XSPI2 のカーネルクロックは IC3 にする（EXTFLASH_KERCLK_IC3=1。ST 版と同じ選択）。 HCLK（FSBL と同じ選択）だと周波数は同じ 200MHz でも、命令だけのコマンドで SR.BUSY が落ちず全コマンドが TIMEOUT する（プリスケーラ 255 でも同じなので速度起因ではない）。 IC3 に替えて動作した（2026-09-21 実機）。 同時に入れた EXTFLASH_FIX_*（VDDIO3 1.8V レンジ・XSPIM 明示設定・XSPI PHY クロック）が要るかは未確認
 ST の GettingStarted-Audio を実機でそのまま動かさない。 起動時に OTP ヒューズを不可逆に焼き、外部フラッシュの FSBL・アプリも上書きする
 ST の FreeRTOS 版コードを持ち込まない。 全 IRQ の優先度を上書きする処理がある
 PowerShell 5.1 用スクリプトは UTF-8 BOM 付きで保存する（BOM 無しだと日本語コメントで param() が壊れる）
 ビルド設定
 Appli プロジェクトは親の Drivers/STM32N6xx_HAL_Driver/Src/ を .project で個別参照している。新しい HAL を使う場合:
 stm32n6xx_hal_conf.h の HAL_xxx_MODULE_ENABLED を有効化（例外一覧に追記）
-CubeIDE で New > File > Advanced > "Link to file in the file system" から .c を追加（_ex.c も）
+CubeIDE で New > File > Advanced > "Link to file in the file system" から .c を追加（_ex.c も）。 追加後に .project を開き、その <link> が <locationURI>PARENT-1-PROJECT_LOC/Drivers/... になっているか確認する。 <location>C:/Users/... の絶対パスになっていたら書き直す（絶対パスだと別の場所に clone したときにビルドできない）
 Clean → Build
 Application/ 配下に新規ファイル・フォルダを作ったら CubeIDE でプロジェクトを Refresh（F5）
 Debug/ 配下の mk 系は CubeIDE が生成する。手動編集しない。ビルド対象の追加・除外は GUI で行い .cproject に永続化する

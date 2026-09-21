@@ -87,6 +87,8 @@ mtk3bsp2_stm32n657/
       audio/            マイク入力・音声出力・FIFO・WM8904 制御
       trace/            DWT CYCCNT による時間計測とCSVダンプ
       fault/            フォルト・未実装IRQのUART可視化
+      extflash/         外部フラッシュ（重み）を XSPI2 でメモリマップ
+        mx66uw1g45g/    ST のフラッシュ用コンポーネントドライバ（下表）
       usermain.c        タスク生成とアプリのエントリ
     Core/               CubeMX 生成コード（一部を手で追加。CLAUDE.md 参照）
     mtk3_bsp2/          μT-Kernel 3.0 BSP2（無改変）
@@ -98,7 +100,7 @@ CLAUDE.md               開発中の制約メモ
 
 ## 本プロジェクトが新規に作成した部分
 
-- `mtk3bsp2_stm32n657/Appli/Application/` 配下すべて
+- `mtk3bsp2_stm32n657/Appli/Application/` 配下すべて（`extflash/mx66uw1g45g/` を除く。下表の ST 製ドライバ）
 - `mtk3bsp2_stm32n657/Appli/Core/` への追加部分
   - `Src/main.c`: `MX_I2C2_Init()` / `MX_SAI1_Init()` / `MX_MDF1_Init()` / `MPU_Config()`
   - `Src/stm32n6xx_it.c`: `GPDMA1_Channel0/2_IRQHandler`, `MDF1_FLT0_IRQHandler`
@@ -121,6 +123,8 @@ CLAUDE.md               開発中の制約メモ
 | CMSIS Core | Arm Limited | Cortex-M55 コア定義 | Apache-2.0（`Drivers/CMSIS/LICENSE`） | STM32CubeN6 | ヘッダ保持 |
 | CMSIS Device STM32N6xx | STMicroelectronics | デバイスレジスタ定義・スタートアップ | Apache-2.0（`Drivers/CMSIS/Device/ST/STM32N6xx/LICENSE.txt`） | STM32CubeN6 | ヘッダ保持 |
 | STM32 ExtMem Manager | STMicroelectronics | FSBL の外部フラッシュ制御・アプリ起動 | **要確認**（ヘッダは「コンポーネント直下の LICENSE に従う、無ければ AS-IS」。LICENSE は未同梱） | STM32CubeN6 | 要確認 |
+| MX66UW1G45G Component Driver V1.1.0 | STMicroelectronics | 外部 NOR フラッシュへのコマンド（リセット・DTR-OPI 設定・メモリマップ）。`Appli/Application/extflash/mx66uw1g45g/` | BSD-3-Clause（同梱の `LICENSE.txt`。GettingStarted-Audio の `LICENSE.md` でも「BSP Components」は BSD-3-Clause） | STM32N6-GettingStarted-Audio v2.3.0（commit 46f1f97）の `Drivers/BSP/Components/mx66uw1g45g/` | `.c`/`.h` は無改変。`mx66uw1g45g_conf.h` は同梱テンプレートからインクルードとダミーサイクル値だけ変更（変更点をファイル内に記載）。ヘッダ保持 |
+| STM32N6570-DK BSP（XSPI NOR 部分） | STMicroelectronics | `extflash.c` の初期化手順の参照元（`stm32n6570_discovery_xspi.c`） | BSD-3-Clause（GettingStarted-Audio の `LICENSE.md` で「STM32N6570-DK BSP Drivers」） | 同上の `Drivers/BSP/STM32N6570-DK/` | ファイルは同梱せず、必要な手順だけを `extflash.c` に書き起こした。参照箇所と相違点をソースのコメントに記載 |
 
 ### Phase 2 で追加予定のもの
 
