@@ -131,6 +131,8 @@ RM := rm -rf
 -include Core/Src/subdir.mk
 -include Application/trace/subdir.mk
 -include Application/fault/subdir.mk
+-include Application/extflash/mx66uw1g45g/subdir.mk
+-include Application/extflash/subdir.mk
 -include Application/audio/subdir.mk
 -include Application/subdir.mk
 -include objects.mk

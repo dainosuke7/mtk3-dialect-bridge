@@ -24,6 +24,8 @@ OBJCOPY_BIN :=
 # Every subdirectory with source files must be described here
 SUBDIRS := \
 Application/audio \
+Application/extflash \
+Application/extflash/mx66uw1g45g \
 Application/fault \
 Application/trace \
 Application \
