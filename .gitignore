@@ -14,3 +14,8 @@ logs/
 *.bin
 *.map
 *.list
+
+# ST提供のモデル重み (aed_weights.hex 等)。3MB超あり、かつ ST のライセンス
+# 下の配布物なので、リポジトリには入れず README の手順で取得する。
+# FSBL/ai_fsbl.hex など ST 配布の hex も同様。
+*.hex
