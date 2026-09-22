@@ -130,6 +130,9 @@ RM := rm -rf
 -include Core/Startup/subdir.mk
 -include Core/Src/subdir.mk
 -include Application/trace/subdir.mk
+-include Application/npu/st/model/subdir.mk
+-include Application/npu/st/ll_aton/subdir.mk
+-include Application/npu/st/device/subdir.mk
 -include Application/npu/subdir.mk
 -include Application/fault/subdir.mk
 -include Application/extflash/mx66uw1g45g/subdir.mk
@@ -188,7 +191,7 @@ main-build: mtk3bsp2_stm32n657_Appli.elf secondary-outputs
 
 # Tool invocations
 mtk3bsp2_stm32n657_Appli.elf mtk3bsp2_stm32n657_Appli.map: $(OBJS) $(USER_OBJS) C:\Users\daich\work\tron\mtk3bsp2_stm32n657\Appli\STM32N657X0HXQ_LRUN.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "mtk3bsp2_stm32n657_Appli.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m55 -T"C:\Users\daich\work\tron\mtk3bsp2_stm32n657\Appli\STM32N657X0HXQ_LRUN.ld" --specs=nosys.specs -Wl,-Map="mtk3bsp2_stm32n657_Appli.map" -Wl,--gc-sections -static -Wl,--cmse-implib -Wl,--out-implib=./secure_nsclib.o --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+	arm-none-eabi-gcc -o "mtk3bsp2_stm32n657_Appli.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m55 -T"C:\Users\daich\work\tron\mtk3bsp2_stm32n657\Appli\STM32N657X0HXQ_LRUN.ld" --specs=nosys.specs -Wl,-Map="mtk3bsp2_stm32n657_Appli.map" -Wl,--gc-sections -static -Wl,--cmse-implib -Wl,--out-implib=./secure_nsclib.o -L../Application/npu/st/lib --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
