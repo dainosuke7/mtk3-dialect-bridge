@@ -3,6 +3,7 @@
 #include "main.h"	// CMSIS (SCB, SCB_CCR_DC_Msk, SCB_*DCache, __DSB), HAL_IncTick
 #include "audio/audio_task.h"
 #include "extflash/extflash.h"
+#include "npu/npu_hw.h"
 #include "fault/fault.h"
 #include "trace/trace.h"
 
@@ -219,6 +220,11 @@ EXPORT INT usermain(void)
 		tm_printf((UB*)"[probe] skipped (external flash not mapped)\n");
 	}
 #endif
+
+	/* NPU 用の内部メモリ・NPU・NPU キャッシュ・RIF。失敗しても止めずに続行する。
+	 * RAM の確認で D キャッシュを一時的に止めるので、音声の DMA を始める前に */
+	er = npu_hw_init();
+	tm_printf((UB*)"npu_hw_init: ret=%d\n", er);
 
 	/* 受け入れテスト (fault.h の FAULT_TEST)。1〜4なら戻ってこない */
 	fault_test_run();

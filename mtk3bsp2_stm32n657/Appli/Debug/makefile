@@ -130,6 +130,7 @@ RM := rm -rf
 -include Core/Startup/subdir.mk
 -include Core/Src/subdir.mk
 -include Application/trace/subdir.mk
+-include Application/npu/subdir.mk
 -include Application/fault/subdir.mk
 -include Application/extflash/mx66uw1g45g/subdir.mk
 -include Application/extflash/subdir.mk

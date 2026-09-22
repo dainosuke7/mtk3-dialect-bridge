@@ -27,6 +27,7 @@ Application/audio \
 Application/extflash \
 Application/extflash/mx66uw1g45g \
 Application/fault \
+Application/npu \
 Application/trace \
 Application \
 Core/Src \

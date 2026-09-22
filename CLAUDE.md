@@ -12,7 +12,6 @@ TRONプログラミングコンテスト2026 — 屋内音お知らせ機
 場所	内容	理由
 Appli/Core/Src/main.c	MX_I2C2_Init, MX_SAI1_Init, MX_MDF1_Init, MPU_Config を追加	音声経路（WM8904制御・SAI出力・PDM入力）に必要
 Appli/Core/Inc/stm32n6xx_hal_conf.h	HAL_XSPI_MODULE_ENABLED を有効化。Appli/.project に stm32n6xx_hal_xspi.c の link を追加	アプリ側で XSPI2 を初期化して外部フラッシュをメモリマップする（Application/extflash/）ため
-Appli/Core/Inc/stm32n6xx_hal_conf.h	（予定）HAL_RAMCFG / HAL_CACHEAXI / HAL_RIF の MODULE_ENABLED	NPU 用 AXISRAM3〜6 と NPU キャッシュ・RIF 設定に必要
 変更は可能な限り USER CODE BEGIN/END 区画の中に書く（CubeMX 再生成で消えない）
 コマンド
 ビルド: bash scripts/build.sh
@@ -37,6 +36,7 @@ SW1(BOOT1) は 1-3 側（Development boot）
 アプリ（内部RAM）	ROM 0x34000400 +511K / RAM 0x34080000 +1536K（〜0x34200000）	BSP2 リンカ定義。コード領域 511K を超えないか監視
 AXISRAM3〜5	0x34200000〜	未使用。LCD フレームバッファ候補
 AXISRAM6	0x34350000〜（NPU は 144KB 使用）	NPU activations
+NPU キャッシュ RAM	0x343C0000〜（256KB）	CACHEAXI 用。NPU キャッシュを有効にしている間は SRAM として使わない
 外部フラッシュ: アプリ	0x70100000〜（FSBL ソース上。起動ログは 0x71000400 と表示、未解決）	署名済みアプリ
 外部フラッシュ: 重み	0x70180000〜（3,282,785 B）	AED モデル重み
 オーディオ経路（MB1939 回路図より）
@@ -66,7 +66,7 @@ PCM リング（pcm_fifo）は SPSC。消費者を増やせない。推論用は
 フォルト可視化（Application/fault/）: 起動時にベクタテーブルを RAM にコピーし、未実装 IRQ 180本とフォルト例外5本を差し替え。 CFSR/BFAR/スタック上の PC を UART 直叩きで出してから停止。デバッガ接続時は __BKPT で止まるので F8 で続行
 FAULT_TEST（fault.h）: 0=無効 / 1=BusFault / 2=ゼロ除算 / 3=未実装IRQ / 4=STKOF。コミット時は必ず 0
 トレース（Application/trace/）: TRACE(id,arg) で (CYCCNT, id, arg) を記録。trace_start(ms) で区間記録し、終了後に CSV ダンプ。 ダンプ中は trace_muted() で他の出力を抑制
-テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す
+テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）は Phase 1 の実機確認が済むまで 1
 既知の罠
 tm_printf はカーネル起動前（knl_start_mtkernel より前）に使えない。 起動前の初期化関数は Error_Handler() を呼ばず、結果を変数に記録してカーネル起動まで到達させる
 FSBL がペリフェラルを触った状態でアプリが起動する。 HAL_xxx_Init が HAL_ERROR を返したら __HAL_RCC_xxx_FORCE_RESET()/RELEASE_RESET() で戻してから初期化（MDF1 で発生。XSPI2 は最初からリセットしてから初期化している）
@@ -77,6 +77,9 @@ STM32N6 に DMA_CIRCULAR は無い。 循環DMAは HAL_DMAEx_List_* で組み、
 BSP2 FSBL の EXTMEM(SFDP) 初期化はこのボードで失敗している (SFDP ヘッダ読み出しでタイムアウト、ManuID=0。IR=0x5A のまま SR.BUSY が残る)。FSBL は XSPI2 のカーネルクロックに HCLK を選んでおり、アプリで HCLK を選んだときと同じ症状なので、原因も同じと見ている (FSBL 側は未検証)。Debug 起動では問題にならないが、外部フラッシュをアプリから読むにはアプリ側で XSPI2 を初期化する必要がある
 外部フラッシュ（MX66UW1G45G）は Application/extflash/ で DTR-OPI メモリマップにする。 OTP の HSLV_VDDIO3 を焼いていないので ST 版の 200MHz は使わない。 SCLK = IC3 200MHz（PLL1 1200MHz / 6）/ (EXTFLASH_PRESCALER + 1) = 50MHz。fuse_vddio() は移植しない
 XSPI2 のカーネルクロックは IC3 にする（EXTFLASH_KERCLK_IC3=1。ST 版と同じ選択）。 HCLK（FSBL と同じ選択）だと周波数は同じ 200MHz でも、命令だけのコマンドで SR.BUSY が落ちず全コマンドが TIMEOUT する（プリスケーラ 255 でも同じなので速度起因ではない）。 IC3 に替えて動作した（2026-09-21 実機）。 同時に入れた EXTFLASH_FIX_*（VDDIO3 1.8V レンジ・XSPIM 明示設定・XSPI PHY クロック）が要るかは未確認
+NPU の初期化は Application/npu/npu_hw.c（usermain から extflash_init の後に1回）。 RIF は RIMC（NPU マスタを CID1・セキュア・特権）と RISC（NPU レジスタをセキュア・特権）を両方設定する。RISC がセキュアでないと RIMC の MSEC は無視され、NPU のアクセスは非セキュアに強制されて既定の RISAF で拒否される。RISAF は設定しない（ST 版も呼んでいない）
+NPU のクロックは FSBL の設定のまま IC6 = PLL1/4 = 300MHz、NPU RAM（AXISRAM3〜6・NPU キャッシュ）は IC11 = PLL1/3 = 400MHz。ST 版（800/800MHz）より遅いので、ST の推論時間の数値は流用できない。アプリからは変えない
+ST 版はブートで MEMSYSCTL MSCR.DCACTIVE が 0 になるとして、キャッシュ有効化の前に立てている。本アプリは立てていない。0 なら CCR.DC=1 でも D キャッシュは効いていない。実機の値は npu_hw_init の表示で確認する（未確認）
 ST の GettingStarted-Audio を実機でそのまま動かさない。 起動時に OTP ヒューズを不可逆に焼き、外部フラッシュの FSBL・アプリも上書きする
 ST の FreeRTOS 版コードを持ち込まない。 全 IRQ の優先度を上書きする処理がある
 PowerShell 5.1 用スクリプトは UTF-8 BOM 付きで保存する（BOM 無しだと日本語コメントで param() が壊れる）
@@ -85,6 +88,7 @@ Appli プロジェクトは親の Drivers/STM32N6xx_HAL_Driver/Src/ を .project
 stm32n6xx_hal_conf.h の HAL_xxx_MODULE_ENABLED を有効化（例外一覧に追記）
 CubeIDE で New > File > Advanced > "Link to file in the file system" から .c を追加（_ex.c も）。 追加後に .project を開き、その <link> が <locationURI>PARENT-1-PROJECT_LOC/Drivers/... になっているか確認する。 <location>C:/Users/... の絶対パスになっていたら書き直す（絶対パスだと別の場所に clone したときにビルドできない）
 Clean → Build
+HAL_RAMCFG / HAL_RIF / HAL_CACHEAXI は Drivers/ に .c も .h も無い。 使わずにレジスタを直接操作する（Application/npu/npu_hw.c。手順は ST の HAL を参照してコメントに記載）
 Application/ 配下に新規ファイル・フォルダを作ったら CubeIDE でプロジェクトを Refresh（F5）
 Debug/ 配下の mk 系は CubeIDE が生成する。手動編集しない。ビルド対象の追加・除外は GUI で行い .cproject に永続化する
 Git

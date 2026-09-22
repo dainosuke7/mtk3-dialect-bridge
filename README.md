@@ -17,7 +17,7 @@ STM32N6570-DK + μT-Kernel 3.0 / TRONプログラミングコンテスト2026 �
 | 段階 | 内容 | 状態 |
 |---|---|---|
 | Phase 0 | PDMマイク → MDF1 → SAI1 → WM8904 のパススルー、時間計測基盤、フォルト可視化 | 完了 |
-| Phase 1 | 外部フラッシュ上のモデル重み領域へのアクセス確認 | 進行中 |
+| Phase 1 | 外部フラッシュ上のモデル重み領域へのアクセス確認、NPU 用メモリと NPU 周辺の初期化 | 進行中 |
 | Phase 2 | Neural-ART NPU での音響イベント検出 | 未着手 |
 
 ## ハードウェア
@@ -89,6 +89,7 @@ mtk3bsp2_stm32n657/
       fault/            フォルト・未実装IRQのUART可視化
       extflash/         外部フラッシュ（重み）を XSPI2 でメモリマップ
         mx66uw1g45g/    ST のフラッシュ用コンポーネントドライバ（下表）
+      npu/              NPU 用内部メモリ・NPU・NPU キャッシュ・RIF の初期化
       usermain.c        タスク生成とアプリのエントリ
     Core/               CubeMX 生成コード（一部を手で追加。CLAUDE.md 参照）
     mtk3_bsp2/          μT-Kernel 3.0 BSP2（無改変）
@@ -125,6 +126,8 @@ CLAUDE.md               開発中の制約メモ
 | STM32 ExtMem Manager | STMicroelectronics | FSBL の外部フラッシュ制御・アプリ起動 | **要確認**（ヘッダは「コンポーネント直下の LICENSE に従う、無ければ AS-IS」。LICENSE は未同梱） | STM32CubeN6 | 要確認 |
 | MX66UW1G45G Component Driver V1.1.0 | STMicroelectronics | 外部 NOR フラッシュへのコマンド（リセット・DTR-OPI 設定・メモリマップ）。`Appli/Application/extflash/mx66uw1g45g/` | BSD-3-Clause（同梱の `LICENSE.txt`。GettingStarted-Audio の `LICENSE.md` でも「BSP Components」は BSD-3-Clause） | STM32N6-GettingStarted-Audio v2.3.0（commit 46f1f97）の `Drivers/BSP/Components/mx66uw1g45g/` | `.c`/`.h` は無改変。`mx66uw1g45g_conf.h` は同梱テンプレートからインクルードとダミーサイクル値だけ変更（変更点をファイル内に記載）。ヘッダ保持 |
 | STM32N6570-DK BSP（XSPI NOR 部分） | STMicroelectronics | `extflash.c` の初期化手順の参照元（`stm32n6570_discovery_xspi.c`） | BSD-3-Clause（GettingStarted-Audio の `LICENSE.md` で「STM32N6570-DK BSP Drivers」） | 同上の `Drivers/BSP/STM32N6570-DK/` | ファイルは同梱せず、必要な手順だけを `extflash.c` に書き起こした。参照箇所と相違点をソースのコメントに記載 |
+| STM32N6-GettingStarted-Audio アプリ部（`Int_Mem_Config()` / `NPU_Config()`）と NPU デバイス定義（`ATON.h`） | STMicroelectronics | `npu_hw.c` の初期化手順と、NPU のバージョンレジスタの番地・期待値の参照元 | SLA0044（`Projects/LICENSE.md`。GettingStarted-Audio の `LICENSE.md` で「Projects」「AI Runtime」は SLA0044） | STM32N6-GettingStarted-Audio v2.3.0（commit 46f1f97）の `Projects/GS/Src/audio_bm.c`、`Projects/Common/misc_toolbox.c`、`Middlewares/ST/AI/Npu/Devices/STM32N6xx/ATON.h` | ファイルは同梱せず、手順と定数だけを `npu_hw.c` に書き起こした。参照箇所と相違点をソースのコメントに記載。SLA0044 は ST 製デバイス上での使用に限る条件で、本機は STM32N6 上でのみ動く |
+| STM32N6xx HAL（RAMCFG / RIF / CACHEAXI 部分） | STMicroelectronics | `npu_hw.c` のレジスタ操作の参照元（`stm32n6xx_hal_ramcfg.c` / `_rif.c` / `_cacheaxi.c`） | BSD-3-Clause（GettingStarted-Audio の `LICENSE.md` で「STM32N6xx HAL/LL Drivers」） | 同上の `Drivers/STM32N6xx_HAL_Driver/`（本リポジトリの `Drivers/` には含まれていない） | ファイルは同梱せず、同じレジスタ操作を `npu_hw.c` に書き起こした。参照箇所をソースのコメントに記載 |
 
 ### Phase 2 で追加予定のもの
 
