@@ -27,7 +27,8 @@ COM ポートは1プロセスしか開けない。他のターミナルを閉じ
 
 CubeProgrammer は CubeIDE 同梱: C:\ST\STM32CubeIDE_*\STM32CubeIDE\plugins\*cubeprogrammer*\tools\bin 重み hex はリポジトリに入れない（ST ライセンス・容量）。取得元は README に記載
 
-NPU 比較用の参照値（PC）: uv run scripts/aed_ref.py <GettingStarted-Audio>/Projects/X-CUBE-AI/models/yamnet_1024_64x96_tl_qdq_int8.onnx → Application/npu/aed_test_input.h を上書き生成（seed 固定なので同じ内容になる）
+NPU 比較用の参照値（PC）: uv run scripts/aed_ref.py <GettingStarted-Audio>/Projects/X-CUBE-AI/models/yamnet_1024_64x96_tl_qdq_int8.onnx → Application/npu/aed_test_input.h を上書き生成（seed 固定なので同じ内容になる。softmax 後の値と、softmax 直前の int8 ロジット・scale・zero_point）
+実録音の判定用（PC）: uv run scripts/aed_clips.py <GettingStarted-Audio> <ESC-50> → Application/npu/aed_test_clips.h（コミットしない）。ESC-50 は git clone github.com/karolpiczak/ESC-50（使うのは meta/ と audio/ の 30 本。ファイル名はスクリプトに固定）
 
 ハード
 STM32N6570-DK / Cortex-M55 600MHz + Neural-ART NPU
@@ -53,6 +54,7 @@ MIC_DET で外部マイクボード装着時はオンボードマイクがバイ
 優先度	タスク	役割
 5	task_pcm	DMA通知（イベントフラグ4ビット）を受けて入力変換・リング操作・出力充填
 10	task_audio, task_1, task_2	パススルー制御・統計表示 / LED 点滅
+15	task_npu	NPU ランタイムの初期化・推論（npu_selftest.c。ll_aton を呼ぶのはこのタスクだけ）
 20	reporter	1秒レート表示
 32	dump	トレース状態機械・CSV ダンプ
 DMA コールバックは TRACE → カウンタ更新 → tk_set_flg だけ行い即 return
@@ -69,7 +71,7 @@ PCM リング（pcm_fifo）は SPSC。消費者を増やせない。推論用は
 フォルト可視化（Application/fault/）: 起動時にベクタテーブルを RAM にコピーし、未実装 IRQ 180本とフォルト例外5本を差し替え。 CFSR/BFAR/スタック上の PC を UART 直叩きで出してから停止。デバッガ接続時は __BKPT で止まるので F8 で続行
 FAULT_TEST（fault.h）: 0=無効 / 1=BusFault / 2=ゼロ除算 / 3=未実装IRQ / 4=STKOF。コミット時は必ず 0
 トレース（Application/trace/）: TRACE(id,arg) で (CYCCNT, id, arg) を記録。trace_start(ms) で区間記録し、終了後に CSV ダンプ。 ダンプ中は trace_muted() で他の出力を抑制
-テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）は Phase 1 の実機確認が済むまで 1
+テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）と NPU_PT_TEST（npu_selftest.c、パススルー中に 960ms 間隔で推論10回。推論タスクの予行）は Phase 1 の実機確認が済むまで 1
 既知の罠
 tm_printf はカーネル起動前（knl_start_mtkernel より前）に使えない。 起動前の初期化関数は Error_Handler() を呼ばず、結果を変数に記録してカーネル起動まで到達させる
 FSBL がペリフェラルを触った状態でアプリが起動する。 HAL_xxx_Init が HAL_ERROR を返したら __HAL_RCC_xxx_FORCE_RESET()/RELEASE_RESET() で戻してから初期化（MDF1 で発生。XSPI2 は最初からリセットしてから初期化している）
@@ -89,8 +91,24 @@ NPU 推論ランタイムは Application/npu/st/（ST のファイルを無改�
 ll_aton は POLLING でも stai_runtime_init() の中で NPU0_IRQn を NVIC 有効にする（エラー通知用、優先度 0 = DI で止まらない）。npu_rt_init() が直後に無効へ戻している。NPU 割り込みは使わない
 ll_aton の LL_ATON_Init は NPU のバージョンが 0 の間読み直し続けるので、NPU にクロックが無いと戻らない。npu_rt_init() は npu_hw_ready() のときだけランタイムを初期化する
 ll_aton のエラー経路は newlib の printf / puts / assert を使う。newlib の malloc のヒープ（sysmem.c の _sbrk、_end から）は μT-Kernel のシステムメモリ（_end から）と重なるので使えない。npu_rt.c で __io_putchar（fault の UART 直接出力）と __assert_func（表示して fault_halt）を定義し、stdout を無バッファにして malloc を起こさない。newlib の malloc / バッファ付き stdio を使うコードを入れない
-推論のタイムアウトは ll_aton の弱いシンボル checkWatchdog() を npu_rt.c で定義して DWT で判定し、超えたら longjmp で npu_rt_run() に戻す（ll_aton は推論の途中の状態のまま。後始末はタスク6）。LL_ATON_ASSERT の中で呼ばれるので NDEBUG を定義すると効かなくなる（npu_rt.c で #error）
+推論のタイムアウトは ll_aton の弱いシンボル checkWatchdog() を npu_rt.c で定義して DWT で判定し、超えたら longjmp で npu_rt_run() に戻す（ll_aton は推論の途中の状態のまま。後始末は未実装で、以降の npu_rt_run は E_IO）。タイムアウト時は実行中の epoch block・ストリームエンジン・INTREG を表示する。LL_ATON_ASSERT の中で呼ばれるので NDEBUG を定義すると効かなくなる（npu_rt.c で #error）
 POLLING の推論中は、呼び出したタスクが LL_Streng_Wait で CPU を回し続ける。それより低い優先度のタスクは推論のあいだ動けない
+usermain は μT-Kernel の初期タスクで、スタックが 1KB（INITTASK_STKSZ、mtkernel/include/sys/inittask.h）しかなく優先度は 1。スタックを多く使う処理（NPU ランタイムは 1KB 超）や時間のかかる処理は専用タスクで行う。npu_rt_init / npu_rt_run は task_npu（スタック 8KB）からだけ呼ぶ
+全タスクに TA_FPU が付く（config.h の ALWAYS_FPU_ATR=1）。float を使うタスクに属性を足す必要は無い
+推論の入力を書いたら SCB_CleanInvalidateDCache_by_Addr（clean だけでは不足。入力の領域は推論中に中間結果と出力の置き場に再利用される）。出力は最後の SW epoch が CPU で書くので invalidate 不要（npu_selftest.c の run_once）
+AED の末尾: epoch 29（NPU、Gemm）→ int8 x10 を 0x34350000 → epoch 30（SW、DequantizeLinear。scale/zp は外部フラッシュ 0x704a1590 / 0x704a1760）→ float x10 を 0x34350440 → epoch 31（SW、Softmax）→ 0x34350410。epoch 31 が 0x34350000〜 を作業域に使うので、推論後に int8 ロジットは残らない。途中の値は npu_rt_set_epoch_hook で取る（npu_selftest.c の logit_hook）
+PC の参照（aed_ref.py）の int8 ロジットは、ORT の最適化あり（int8 演算）となし（float 演算）で最大 15 LSB 違う（上位クラスでは 2 LSB）。NPU との比較の許容幅はこれを踏まえて決める
+NPU の正しさの判定は ESC-10 の実録音 30 本の1位を PC と比べる（npu_selftest.c の clips_check、入力は scripts/aed_clips.py が生成する aed_test_clips.h）。乱数入力は分布外で上位2クラスが拮抗し、丸めの積み重ねで確率が動くので参考値だけ
+aed_test_clips.h は ESC-50 由来なのでコミットしない（.gitignore）。無ければ npu_selftest.c は __has_include で実録音の判定を飛ばす（NOT JUDGED）。ヘッダ無しでビルドした後は .d にヘッダが載らず make が作り直さないので、aed_clips.py が npu_selftest.c の更新時刻を進める。30 本入りでコード領域 436,800B / 511KB（83.5%）。足りなくなったら本数を減らすかヘッダを消す
+epoch フック（npu_rt_set_epoch_hook）は今は呼ばれない。stai_network_run（ll_aton_stai_internal.c:417-425）が推論のたびに epoch コールバックを NULL か stai 自身のものに設定し直すため。直すなら stai_network_set_callback() で登録する（未実施）
+前処理 log-mel の仕様（タスク8 でボードに移植するときの参照。PC 実装は scripts/aed_clips.py の logmel_q8。ST の値は GenHeader/user_config_aed.yaml → Dpu/ai_model_config.h.aed・user_mel_tables.c.aed）
+  入力: int16 16kHz の先頭 15600 サンプル。列 i（0〜95）はサンプル [160i, 160i+400)
+  列ごと: x/32768（arm_q15_to_f16）→ 周期ハン窓 400（0.5-0.5cos(2πn/400)）→ 左右 56 ずつゼロ詰めして 512 点 rfft → 振幅 |X| 257 本（MAGNITUDE。2乗しない）→ メルフィルタ 64 本（librosa の mel、htk=True・norm=None・125〜7500Hz。非ゼロ係数 461 個を start/stop 番号で持つ）→ ref=1.0 で割る → 0 以下は FLT_MIN → 自然対数（dB ではない。TopdB の切り捨て無し）
+  量子化: int8 = SSAT(roundf(logmel × (1/0.0305305421) + 33), 8)。roundf は 0.5 を 0 から遠い側へ丸める（numpy の rint は偶数丸めなので違う）
+  並び: p_spectro[i + 96×j] = 列 i・メル j（preproc_dpu.c:135-143 の転置）= NPU 入力 1x64x96x1 の [メル][列]
+  ST の実装箇所: preproc_dpu.c:33-80（初期化。ゼロ詰め :52-53、Ref/TopdB :69-70）、feature_extraction_f16.c:264 LogMelSpectrogramColumn_q15_f16_Q8（量子化 :334-337）、audio_din_f16.c:30、mel_filterbank_f16.c:214。窓とメルの表は aed_clips.py が毎回 ST の表と照合する（差は窓 2.8e-8、メル 5e-12）
+  ST は FP16 で計算する（app_config.h の PREPROC_FLOAT_16。inv_scale も FP16 に丸めて 32.75）。PC 実装とボードへの移植は float32 の想定で、int8 で 1 LSB 程度ずれ得る
+  ESC-10 の 30 本で PC の1位が正解と一致 29/30（最適化あり・なし同じ）。前処理・並び・クラス順が正しい裏付け（外れは静かな crackling_fire 1本が clock_tick）
 PowerShell 5.1 用スクリプトは UTF-8 BOM 付きで保存する（BOM 無しだと日本語コメントで param() が壊れる）
 ビルド設定
 Appli プロジェクトは親の Drivers/STM32N6xx_HAL_Driver/Src/ を .project で個別参照している。新しい HAL を使う場合:

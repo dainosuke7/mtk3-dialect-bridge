@@ -17,7 +17,7 @@ STM32N6570-DK + μT-Kernel 3.0 / TRONプログラミングコンテスト2026 �
 | 段階 | 内容 | 状態 |
 |---|---|---|
 | Phase 0 | PDMマイク → MDF1 → SAI1 → WM8904 のパススルー、時間計測基盤、フォルト可視化 | 完了 |
-| Phase 1 | 外部フラッシュ上のモデル重み領域へのアクセス確認、NPU 用メモリと NPU 周辺の初期化、NPU ランタイムと AED モデルの組み込み（初期化まで。推論は未実行） | 進行中 |
+| Phase 1 | 外部フラッシュ上のモデル重み領域へのアクセス確認、NPU 用メモリと NPU 周辺の初期化、NPU ランタイムと AED モデルの組み込み、固定入力での推論の自己テスト（PC の ONNX Runtime の結果と比較） | 進行中 |
 | Phase 2 | Neural-ART NPU での音響イベント検出 | 未着手 |
 
 ## ハードウェア
@@ -89,7 +89,21 @@ uv run scripts/aed_ref.py <STM32N6-GettingStarted-Audio>/Projects/X-CUBE-AI/mode
 ```
 
 10 クラスの出力を表示し、入力（int8 1x64x96x1、seed 固定）と期待値を
-`Appli/Application/npu/aed_test_input.h` に書き出します。
+`Appli/Application/npu/aed_test_input.h` に書き出します。これは参考値で、NPU の合否には使いません。
+
+NPU の合否は、環境音データセット ESC-50 のうち ESC-10 の実録音 30 本で、1位のクラスを
+PC と比べて判定します。録音から作る入力は、元のライセンス（ESC-10 は CC BY 3.0、ESC-50 全体は
+CC BY-NC 3.0）のためリポジトリに含めていません。次の手順で生成してからビルドしてください
+（生成しなくてもビルドは通り、実録音の判定だけが飛ばされます）。
+
+```bash
+git clone https://github.com/karolpiczak/ESC-50.git
+uv run scripts/aed_clips.py <STM32N6-GettingStarted-Audio> <ESC-50>
+```
+
+ST と同じ前処理（log-mel 64 x 96）で int8 入力を作り、ONNX Runtime の1位と一緒に
+`Appli/Application/npu/aed_test_clips.h` に書き出します（.gitignore 済み）。
+前処理の設定と表は GettingStarted-Audio のものと毎回照合します。
 
 ## ディレクトリ構成
 
@@ -155,6 +169,12 @@ CLAUDE.md               開発中の制約メモ
 | STM32 AI AudioPreprocessing Library | STMicroelectronics | log-mel スペクトログラム計算 | STM32N6-GettingStarted-Audio | 検討中 |
 | CMSIS-DSP | Arm Limited | FFT 等 | 同上 | 検討中 |
 | AED モデル重み（YAMNet 1024 派生, aed_weights.hex） | STMicroelectronics | 学習済みモデル | 同上 | **含めない**（上記手順で取得） |
+
+### 同梱せず、開発中の確認にだけ使うもの
+
+| 名称 | 権利者 | 用途 | ライセンス（確認元） | 入手方法 | 扱い |
+|---|---|---|---|---|---|
+| ESC-50（うち ESC-10 サブセット） | Karol J. Piczak（各クリップの元の録音は Freesound の各投稿者） | NPU の推論結果を PC と比べる実録音 30 本（`scripts/aed_clips.py`） | ESC-10 は CC BY 3.0、ESC-50 全体は CC BY-NC 3.0（ESC-50 の `LICENSE`） | github.com/karolpiczak/ESC-50 | 音声も、そこから作った入力（`aed_test_clips.h`）もリポジトリに入れない。入力はヘッダを生成した手元のビルドの自己テストにだけ入る（ヘッダが無ければ入らない） |
 
 > **TODO（提出前）**
 > - ExtMem Manager のライセンスを STM32CubeN6 の配布物で確認する
