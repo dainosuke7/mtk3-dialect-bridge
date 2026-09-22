@@ -425,4 +425,21 @@ static const char *const aed_test_class_names[AED_TEST_CLASSES] = {
 	"chainsaw", "clock_tick", "crackling_fire", "crying_baby", "dog", "helicopter", "rain", "rooster", "sea_waves", "sneezing"
 };
 
+/*
+ * softmax 直前の int8 ロジット (DequantizeLinear の入力)。
+ * float のロジット = (q - AED_TEST_LOGIT_ZP) * AED_TEST_LOGIT_SCALE が Softmax に入る
+ */
+#define AED_TEST_LOGIT_SCALE	(0.0601168834f)
+#define AED_TEST_LOGIT_ZP	(51)
+
+/* ONNX Runtime の既定 (QDQ を int8 演算に融合) */
+static const int8_t aed_test_logits_ort[AED_TEST_CLASSES] = {
+	 -47,   21,  -64,  -90, -107,   37,  -26,  -32,  -37,  -72
+};
+
+/* ONNX Runtime のグラフ最適化なし (float で計算し、QuantizeLinear で int8 に丸めた値) */
+static const int8_t aed_test_logits_ort_noopt[AED_TEST_CLASSES] = {
+	 -59,   23,  -75, -105, -119,   35,  -24,  -39,  -44,  -80
+};
+
 #endif	/* NPU_AED_TEST_INPUT_H */

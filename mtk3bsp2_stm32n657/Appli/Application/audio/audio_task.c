@@ -533,6 +533,18 @@ EXPORT BOOL audio_passthrough_active(void)
 	return passthrough_active ? TRUE : FALSE;
 }
 
+/* task_pcm (と DMA コールバック) が更新するので、3つをそろえて取るために割り込みを止める */
+EXPORT void audio_pt_counts(UW *under, UW *over, UW *late)
+{
+	UINT	imask;
+
+	DI(imask);
+	*under = pt_underrun;
+	*over  = pt_overrun;
+	*late  = pt_late;
+	EI(imask);
+}
+
 EXPORT void audio_task_start(void)
 {
 	audio_flgid = tk_cre_flg(&cflg_audio);

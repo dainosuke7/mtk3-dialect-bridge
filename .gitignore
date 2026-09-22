@@ -15,7 +15,13 @@ logs/
 *.map
 *.list
 
+__pycache__/
+
 # ST提供のモデル重み (aed_weights.hex 等)。3MB超あり、かつ ST のライセンス
 # 下の配布物なので、リポジトリには入れず README の手順で取得する。
 # FSBL/ai_fsbl.hex など ST 配布の hex も同様。
 *.hex
+
+# ESC-50 の録音から作った NPU の比較用入力 (scripts/aed_clips.py の生成物)。
+# 元の音声のライセンス (CC BY / CC BY-NC) のため入れない。スクリプトで再生成する
+mtk3bsp2_stm32n657/Appli/Application/npu/aed_test_clips.h

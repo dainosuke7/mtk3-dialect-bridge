@@ -7,17 +7,20 @@
 C_SRCS += \
 ../Application/npu/npu_cache_port.c \
 ../Application/npu/npu_hw.c \
-../Application/npu/npu_rt.c 
+../Application/npu/npu_rt.c \
+../Application/npu/npu_selftest.c 
 
 OBJS += \
 ./Application/npu/npu_cache_port.o \
 ./Application/npu/npu_hw.o \
-./Application/npu/npu_rt.o 
+./Application/npu/npu_rt.o \
+./Application/npu/npu_selftest.o 
 
 C_DEPS += \
 ./Application/npu/npu_cache_port.d \
 ./Application/npu/npu_hw.d \
-./Application/npu/npu_rt.d 
+./Application/npu/npu_rt.d \
+./Application/npu/npu_selftest.d 
 
 
 # Each subdirectory must supply rules for building sources it contributes
@@ -27,7 +30,7 @@ Application/npu/%.o Application/npu/%.su Application/npu/%.cyclo: ../Application
 clean: clean-Application-2f-npu
 
 clean-Application-2f-npu:
-	-$(RM) ./Application/npu/npu_cache_port.cyclo ./Application/npu/npu_cache_port.d ./Application/npu/npu_cache_port.o ./Application/npu/npu_cache_port.su ./Application/npu/npu_hw.cyclo ./Application/npu/npu_hw.d ./Application/npu/npu_hw.o ./Application/npu/npu_hw.su ./Application/npu/npu_rt.cyclo ./Application/npu/npu_rt.d ./Application/npu/npu_rt.o ./Application/npu/npu_rt.su
+	-$(RM) ./Application/npu/npu_cache_port.cyclo ./Application/npu/npu_cache_port.d ./Application/npu/npu_cache_port.o ./Application/npu/npu_cache_port.su ./Application/npu/npu_hw.cyclo ./Application/npu/npu_hw.d ./Application/npu/npu_hw.o ./Application/npu/npu_hw.su ./Application/npu/npu_rt.cyclo ./Application/npu/npu_rt.d ./Application/npu/npu_rt.o ./Application/npu/npu_rt.su ./Application/npu/npu_selftest.cyclo ./Application/npu/npu_selftest.d ./Application/npu/npu_selftest.o ./Application/npu/npu_selftest.su
 
 .PHONY: clean-Application-2f-npu
 

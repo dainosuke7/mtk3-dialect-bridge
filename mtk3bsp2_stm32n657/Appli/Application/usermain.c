@@ -4,7 +4,7 @@
 #include "audio/audio_task.h"
 #include "extflash/extflash.h"
 #include "npu/npu_hw.h"
-#include "npu/npu_rt.h"
+#include "npu/npu_selftest.h"
 #include "fault/fault.h"
 #include "trace/trace.h"
 
@@ -227,10 +227,12 @@ EXPORT INT usermain(void)
 	er = npu_hw_init();
 	tm_printf((UB*)"npu_hw_init: ret=%d\n", er);
 
-	/* NPU 推論ランタイムと AED モデルの初期化 (推論はしない)。npu_hw_init が
-	 * 成功していなければ中で何もせずに戻る */
-	er = npu_rt_init();
-	tm_printf((UB*)"npu_rt_init: ret=%d\n", er);
+	/* NPU タスク: 推論ランタイムの初期化と、固定入力での推論の自己テスト。
+	 * ランタイムはスタックを多く使うので、この初期タスク (スタック 1KB) では呼ばない。
+	 * 自己テストが終わるまでここで待つ (推論時間を音声の負荷なしで測るため、音声より先に)。
+	 * npu_hw_init が失敗していればタスクの中で何もせずに終わる */
+	er = npu_task_start();
+	tm_printf((UB*)"npu_task_start: ret=%d\n", er);
 
 	/* 受け入れテスト (fault.h の FAULT_TEST)。1〜4なら戻ってこない */
 	fault_test_run();

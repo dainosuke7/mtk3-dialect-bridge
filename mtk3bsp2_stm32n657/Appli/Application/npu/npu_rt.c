@@ -69,6 +69,8 @@ LOCAL BOOL		broken = FALSE;		/* タイムアウトして ll_aton が推論の途
 LOCAL B			*in_buf = NULL;
 LOCAL const float	*out_buf = NULL;
 LOCAL UW		timeouts = 0;		/* 書くのは推論を呼ぶタスクだけ */
+LOCAL UW		runs = 0;		/* npu_rt_run の呼び出し回数 (TRACE の arg に下位8bit) */
+LOCAL NPU_RT_EPOCH_HOOK	epoch_hook = NULL;	/* npu_rt_set_epoch_hook */
 
 /* タイムアウトの監視 (推論を呼ぶタスクの中だけで読み書きする) */
 LOCAL jmp_buf		wd_jmp;
@@ -263,6 +265,38 @@ EXPORT const float *npu_rt_output(void)
 	return ready ? out_buf : NULL;
 }
 
+/*
+ * タイムアウトした時点の ll_aton と NPU の状態を出す (推論の途中で止まったまま読む)。
+ * - 実行中の epoch block の番号。epoch 番号そのもの (epoch_num) は LL_ATON_EB_DBG_INFO を
+ *   定義しないと持たないので、配列の何番目かと関数の番地を出す。番地は .map で
+ *   LL_ATON_Start_EpochBlock_N / LL_ATON_End_EpochBlock_N を引けば N (network.c の epoch 番号) が分かる
+ * - wait_mask の各ストリームエンジンの CTRL (bit31 RUNNING が 1 のままなら終わっていない)
+ * - 割り込みコントローラの INTREG。NVIC を切っていてもエラーはここにラッチされる
+ */
+LOCAL void rt_dump_state(void)
+{
+	const NN_Execution_State_TypeDef	*st = &((_stai_aton_context *)net)->network_instance.exec_state;
+	const LL_ATON_RT_EpochBlockItem_t	*eb = st->current_epoch_block;
+	UW					i;
+
+	if(eb == NULL || st->first_epoch_block == NULL) {
+		tm_printf((UB*)"  [npu] no current epoch block (inference_started=%d)\n", st->inference_started ? 1 : 0);
+	} else {
+		tm_printf((UB*)"  [npu] epoch block %d of %u: flags=0x%x wait_mask=0x%x start_fn=0x%08x end_fn=0x%08x\n",
+				(INT)(eb - st->first_epoch_block), (UW)st->nr_of_epoch_blocks,
+				(UW)eb->flags, (UW)eb->wait_mask,
+				(UW)(uintptr_t)eb->start_epoch_block, (UW)(uintptr_t)eb->end_epoch_block);
+		if((eb->flags & EpochBlock_Flags_blob) == 0) {
+			for(i = 0; i < ATON_STRENG_NUM; i++) {
+				if((eb->wait_mask & (1U << i)) == 0) continue;
+				tm_printf((UB*)"  [npu] STRENG%u CTRL=0x%08x (RUNNING=%u)\n", i, (UW)ATON_STRENG_CTRL_GET(i),
+						(UW)((ATON_STRENG_CTRL_GET(i) >> ATON_STRENG_CTRL_RUNNING_LSB) & 1U));
+			}
+		}
+	}
+	tm_printf((UB*)"  [npu] INTCTRL INTREG=0x%08x\n", (UW)ATON_INTCTRL_INTREG_GET(0));
+}
+
 EXPORT ER npu_rt_run(void)
 {
 	stai_return_code	rc;
@@ -270,6 +304,7 @@ EXPORT ER npu_rt_run(void)
 	if(!ready) return E_OBJ;
 	if(broken) return E_IO;
 
+	runs++;
 	wd_lim = trace_cyc_per_us() * NPU_RT_TIMEOUT_US;
 	wd_t0  = NOW();
 
@@ -279,12 +314,15 @@ EXPORT ER npu_rt_run(void)
 		tm_printf((UB*)"[npu] inference TIMEOUT: %u us > %u us (count=%u)."
 				" runtime left mid-inference, further runs refused until recovery is implemented\n",
 				trace_cyc_to_us(wd_elapsed), (UW)NPU_RT_TIMEOUT_US, timeouts);
+		rt_dump_state();
 		return E_TMOUT;
 	}
 
+	TRACE(EV_INF_START, (UB)runs);
 	wd_armed = TRUE;
 	rc = stai_network_run(net, STAI_MODE_SYNC);
 	wd_armed = FALSE;
+	TRACE(EV_INF_END, (UB)runs);
 
 	if(rc != STAI_SUCCESS) {
 		tm_printf((UB*)"[npu] stai_network_run: rc=0x%x\n", (UW)rc);
@@ -296,4 +334,87 @@ EXPORT ER npu_rt_run(void)
 EXPORT UW npu_rt_timeouts(void)
 {
 	return timeouts;
+}
+
+/*
+ * epoch コールバックの呼ばれ方の記録 (デバッグ用。npu_rt_cb_log / npu_rt_cb_log_show)。
+ * 1回の推論で最大 epoch block 数 x 4 回 (PRE/POST_START、PRE/POST_END) 呼ばれる
+ */
+#define CB_LOG_MAX	(160)
+typedef struct {
+	UB	type;		/* LL_ATON_RT_Callbacktype_t */
+	UB	idx;		/* epoch block の番号。block が無いイベントは 0xFF */
+	UB	n;		/* epoch block の数 */
+	UB	flags;		/* EpochBlock_Flags_* の下位8bit */
+} CB_LOG;
+LOCAL CB_LOG	cb_log[CB_LOG_MAX];
+LOCAL UW	cb_log_n;	/* 呼ばれた回数 (配列に入りきらなかった分も数える) */
+LOCAL BOOL	cb_log_on = FALSE;
+
+/* ll_aton の epoch コールバック。フックには各 epoch block の終了処理 (SW の演算はここで走る) の直前だけ渡す */
+LOCAL void rt_epoch_cb(LL_ATON_RT_Callbacktype_t ctype, const NN_Instance_TypeDef *inst,
+			const LL_ATON_RT_EpochBlockItem_t *eb)
+{
+	INT	idx = (eb != NULL) ? (INT)(eb - inst->exec_state.first_epoch_block) : -1;
+
+	if(cb_log_on) {
+		if(cb_log_n < CB_LOG_MAX) {
+			cb_log[cb_log_n].type  = (UB)ctype;
+			cb_log[cb_log_n].idx   = (UB)((idx >= 0) ? idx : 0xFF);
+			cb_log[cb_log_n].n     = (UB)inst->exec_state.nr_of_epoch_blocks;
+			cb_log[cb_log_n].flags = (UB)((eb != NULL) ? eb->flags : 0U);
+		}
+		cb_log_n++;
+	}
+	if(ctype != LL_ATON_RT_Callbacktype_PRE_END || eb == NULL || epoch_hook == NULL) return;
+	epoch_hook(idx, (INT)inst->exec_state.nr_of_epoch_blocks, (UW)eb->flags);
+}
+
+EXPORT void npu_rt_cb_log(BOOL on)
+{
+	if(on) cb_log_n = 0;
+	cb_log_on = on;
+}
+
+EXPORT BOOL npu_rt_epoch_cb_installed(void)
+{
+	return ready && (((_stai_aton_context *)net)->network_instance.exec_state.epoch_callback_function == rt_epoch_cb);
+}
+
+LOCAL const char *cb_type_name(UB type)
+{
+	switch(type) {
+	case LL_ATON_RT_Callbacktype_PRE_START:  return "PRE_START";
+	case LL_ATON_RT_Callbacktype_POST_START: return "POST_START";
+	case LL_ATON_RT_Callbacktype_PRE_END:    return "PRE_END";
+	case LL_ATON_RT_Callbacktype_POST_END:   return "POST_END";
+	case LL_ATON_RT_Callbacktype_NN_Init:    return "NN_Init";
+	case LL_ATON_RT_Callbacktype_NN_DeInit:  return "NN_DeInit";
+	case LL_ATON_RT_Callbacktype_RT_Init:    return "RT_Init";
+	case LL_ATON_RT_Callbacktype_RT_Deinit:  return "RT_Deinit";
+	default:                                 return "?";
+	}
+}
+
+EXPORT void npu_rt_cb_log_show(void)
+{
+	UW	i;
+
+	tm_printf((UB*)"  [npu] epoch callback calls recorded: %u\n", cb_log_n);
+	for(i = 0; i < cb_log_n && i < CB_LOG_MAX; i++) {
+		tm_printf((UB*)"    [%3u] block %3d / %u  %-10s flags=0x%02x\n", i,
+				(cb_log[i].idx == 0xFF) ? -1 : (INT)cb_log[i].idx, (UW)cb_log[i].n,
+				cb_type_name(cb_log[i].type), (UW)cb_log[i].flags);
+	}
+}
+
+EXPORT ER npu_rt_set_epoch_hook(NPU_RT_EPOCH_HOOK hook)
+{
+	if(!ready) return E_OBJ;
+
+	epoch_hook = hook;
+	/* ll_aton の制約: 推論中でないときに設定する (npu_rt_run の外から呼ぶので満たす) */
+	LL_ATON_RT_SetEpochCallback((hook != NULL) ? rt_epoch_cb : NULL,
+			&((_stai_aton_context *)net)->network_instance);
+	return E_OK;
 }

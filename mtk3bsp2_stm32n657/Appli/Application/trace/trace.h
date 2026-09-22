@@ -45,8 +45,8 @@ typedef enum {
 	EV_AUD_END	= 6,	/* 処理終了  arg=起床要因ビット(F_*) */
 	EV_UNDERRUN	= 7,	/* arg: 0=FIFO不足 1=出力が間に合わず */
 	EV_OVERRUN	= 8,	/* arg: 0=入力側 1=出力側 */
-	EV_INF_START	= 9,	/* Phase 2 */
-	EV_INF_END	= 10,	/* Phase 2 */
+	EV_INF_START	= 9,	/* 推論開始 (npu_rt_run)  arg=通算回数の下位8bit */
+	EV_INF_END	= 10,	/* 推論終了 (npu_rt_run)  arg=通算回数の下位8bit */
 	EV_NOTIFY	= 11,	/* Phase 2 */
 	EV_INF_TMO	= 12,	/* 推論タイムアウト  arg=経過ms (255で頭打ち) */
 	EV_MAX

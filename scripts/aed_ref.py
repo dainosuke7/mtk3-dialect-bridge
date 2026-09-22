@@ -24,6 +24,13 @@ Projects/X-CUBE-AI/models/yamnet_1024_64x96_tl_qdq_int8.onnx (README 参照)。
 出力:
     10 クラスの float32 (softmax 後)。ONNX Runtime の既定 (QDQ を int8 演算に融合) と
     グラフ最適化なし (float で量子化を模擬) の2通りを表示し、C のヘッダにも入れる。
+
+softmax 直前の int8 ロジット:
+    グラフの末尾は Gemm → QuantizeLinear → DequantizeLinear → Softmax。
+    DequantizeLinear の入力 (int8 x10) と出力 (Softmax の入力 float x10) をグラフの
+    出力に追加して取り出し、scale / zero_point と合わせて表示・ヘッダに書き出す。
+    出力を足しても計算が変わらないこと (softmax 後の値が元のグラフと完全一致) を確かめる。
+    ボードでは NPU が同じ int8 を AXISRAM6 に書き、SW の DequantizeLinear が読む。
 """
 
 import argparse
@@ -93,12 +100,40 @@ def stai_input_quant() -> tuple[np.float32, int]:
     return np.float32(s.group(1)), int(z.group(1))
 
 
-def run(path: Path, name: str, x: np.ndarray, optimize: bool) -> np.ndarray:
+def softmax_input_quant(model: onnx.ModelProto) -> tuple[str, str, np.float32, int]:
+    """Softmax の入力をたどり、(int8 のテンソル名, Softmax に入る float のテンソル名, scale, zp)。"""
+    g = model.graph
+    inits = {t.name: numpy_helper.to_array(t) for t in g.initializer}
+    producer = {o: n for n in g.node for o in n.output}
+
+    softmax = [n for n in g.node if n.op_type == "Softmax"]
+    if len(softmax) != 1:
+        sys.exit(f"Softmax が1つでない: {len(softmax)}")
+    dq = producer.get(softmax[0].input[0])
+    if dq is None or dq.op_type != "DequantizeLinear":
+        sys.exit("Softmax の直前が DequantizeLinear でない")
+    scale = inits[dq.input[1]]
+    zp = inits[dq.input[2]]
+    if scale.size != 1 or zp.dtype != np.int8:
+        sys.exit(f"Softmax 直前の量子化が per-tensor int8 でない: scale={scale}, zp={zp}")
+    return dq.input[0], dq.output[0], np.float32(scale.reshape(())), int(zp.reshape(()))
+
+
+def with_outputs(model: onnx.ModelProto, extra: list[tuple[str, int]]) -> bytes:
+    """中間のテンソルをグラフの出力に足したモデル (シリアライズ済み)。"""
+    m = onnx.ModelProto()
+    m.CopyFrom(model)
+    for name, elem_type in extra:
+        m.graph.output.append(onnx.helper.make_tensor_value_info(name, elem_type, None))
+    return m.SerializeToString()
+
+
+def run(model_bytes: bytes, name: str, x: np.ndarray, optimize: bool) -> list[np.ndarray]:
     so = ort.SessionOptions()
     if not optimize:
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-    sess = ort.InferenceSession(str(path), so, providers=["CPUExecutionProvider"])
-    return sess.run(None, {name: x})[0].reshape(-1).astype(np.float32)
+    sess = ort.InferenceSession(model_bytes, so, providers=["CPUExecutionProvider"])
+    return [y.reshape(-1) for y in sess.run(None, {name: x})]
 
 
 def c_float(v: np.float32) -> str:
@@ -106,12 +141,14 @@ def c_float(v: np.float32) -> str:
 
 
 def write_header(q: np.ndarray, y_opt: np.ndarray, y_flt: np.ndarray,
-                 scale: np.float32, zp: int, sha256: str) -> None:
+                 scale: np.float32, zp: int, sha256: str,
+                 l_opt: np.ndarray, l_flt: np.ndarray, l_scale: np.float32, l_zp: int) -> None:
     flat = q.reshape(-1)  # C の並び (メルが外側、フレームが内側)
     rows = []
     for i in range(0, flat.size, 16):
         rows.append("\t" + ", ".join(f"{int(v):4d}" for v in flat[i:i + 16]) + ",")
     names = ", ".join(f'"{c}"' for c in CLASSES)
+    c_int8 = lambda v: ", ".join(f"{int(x):4d}" for x in v)
     text = f"""/* 自動生成: scripts/aed_ref.py。手で編集しない (作り直すときはスクリプトを実行する) */
 #ifndef NPU_AED_TEST_INPUT_H
 #define NPU_AED_TEST_INPUT_H
@@ -156,6 +193,23 @@ static const char *const aed_test_class_names[AED_TEST_CLASSES] = {{
 	{names}
 }};
 
+/*
+ * softmax 直前の int8 ロジット (DequantizeLinear の入力)。
+ * float のロジット = (q - AED_TEST_LOGIT_ZP) * AED_TEST_LOGIT_SCALE が Softmax に入る
+ */
+#define AED_TEST_LOGIT_SCALE	({c_float(l_scale)})
+#define AED_TEST_LOGIT_ZP	({l_zp})
+
+/* ONNX Runtime の既定 (QDQ を int8 演算に融合) */
+static const int8_t aed_test_logits_ort[AED_TEST_CLASSES] = {{
+	{c_int8(l_opt)}
+}};
+
+/* ONNX Runtime のグラフ最適化なし (float で計算し、QuantizeLinear で int8 に丸めた値) */
+static const int8_t aed_test_logits_ort_noopt[AED_TEST_CLASSES] = {{
+	{c_int8(l_flt)}
+}};
+
 #endif	/* NPU_AED_TEST_INPUT_H */
 """
     OUT_H.write_text(text, encoding="utf-8", newline="\n")
@@ -183,8 +237,20 @@ def main() -> None:
     if not np.array_equal(back, q):
         sys.exit(f"量子化の往復が一致しない ({np.count_nonzero(back != q)} 要素)")
 
-    y_opt = run(args.onnx, name, x, optimize=True)
-    y_flt = run(args.onnx, name, x, optimize=False)
+    l_name, lf_name, l_scale, l_zp = softmax_input_quant(model)
+    probe = with_outputs(model, [(l_name, onnx.TensorProto.INT8), (lf_name, onnx.TensorProto.FLOAT)])
+
+    y_opt, l_opt, lf_opt = run(probe, name, x, optimize=True)
+    y_flt, l_flt, lf_flt = run(probe, name, x, optimize=False)
+    # 出力を足したことで計算が変わっていないか (元のグラフの softmax 後と完全一致)
+    y_opt0 = run(blob, name, x, optimize=True)[0]
+    y_flt0 = run(blob, name, x, optimize=False)[0]
+    if not (np.array_equal(y_opt, y_opt0) and np.array_equal(y_flt, y_flt0)):
+        sys.exit("中間出力を足すと softmax 後の値が変わる (最適化の結果が変わった)")
+    # Softmax に入る float が (q - zp) * scale そのものか
+    for lq, lf in ((l_opt, lf_opt), (l_flt, lf_flt)):
+        if not np.array_equal(((lq.astype(np.float32) - np.float32(l_zp)) * l_scale).astype(np.float32), lf):
+            sys.exit("Softmax に入る float が (q - zp) * scale と一致しない")
 
     print(f"model : {args.onnx} (sha256 {sha256[:16]}...)")
     print(f"ort   : {ort.__version__}, providers={ort.get_available_providers()}")
@@ -201,7 +267,17 @@ def main() -> None:
           f"{int(y_flt.argmax())} {CLASSES[int(y_flt.argmax())]} (no-opt), "
           f"max |default - no-opt| = {np.abs(y_opt - y_flt).max():.6f}")
 
-    write_header(q, y_opt, y_flt, scale, zp, sha256)
+    print()
+    print(f"softmax input (int8 logits): {l_name}")
+    print(f"  scale={float(l_scale):.9g} zero_point={l_zp}  "
+          "(float logit = (q - zero_point) * scale; probe outputs do not change results)")
+    print(f"{'#':>2} {'class':<15} {'q default':>9} {'q no-opt':>9} {'diff':>5} "
+          f"{'logit default':>14} {'logit no-opt':>13}")
+    for i, c in enumerate(CLASSES):
+        print(f"{i:>2} {c:<15} {int(l_opt[i]):9d} {int(l_flt[i]):9d} "
+              f"{int(l_opt[i]) - int(l_flt[i]):5d} {lf_opt[i]:14.6f} {lf_flt[i]:13.6f}")
+
+    write_header(q, y_opt, y_flt, scale, zp, sha256, l_opt, l_flt, l_scale, l_zp)
     print(f"\nwrote {OUT_H.relative_to(REPO)}")
 
 

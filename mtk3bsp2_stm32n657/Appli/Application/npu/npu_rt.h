@@ -31,7 +31,8 @@
  * ランタイムとネットワークを初期化し、各ステップの結果を UART に出す。推論はしない。
  * 戻り値: E_OK 成功 / E_OBJ npu_hw_init() が済んでいない / E_IO ランタイムの初期化失敗
  *
- * - npu_hw_init() が E_OK を返した後に1回だけ呼ぶ。NPU にクロックが入っていないと
+ * - npu_hw_init() が E_OK を返した後に1回だけ、NPU タスクから呼ぶ (npu_rt_run と同じ理由で
+ *   usermain からは呼ばない)。NPU にクロックが入っていないと
  *   ll_aton の初期化 (LL_ATON_Init) が NPU のバージョンを読み続けて戻らないため、
  *   npu_hw_ready() でなければ何もしない
  * - 失敗しても Error_Handler() は呼ばない。呼び出し側は結果を表示して続行してよい
@@ -54,15 +55,45 @@ EXPORT const float *npu_rt_output(void);
  * 戻り値: E_OK 完了 / E_OBJ 未初期化 / E_IO ランタイムがエラーを返した・前回タイムアウトして
  *         後始末が済んでいない / E_TMOUT NPU_RT_TIMEOUT_US を超えた
  *
- * タイムアウトしたら TRACE (EV_INF_TMO) とカウンタに残し、UART に理由を出して E_TMOUT で戻る
- * (assert では止めない)。ll_aton の内部状態は推論の途中のままなので、それ以降の呼び出しは
- * E_IO を返す。実行中 epoch の中断などの後始末はタスク6 で実装する。
+ * 推論の前後に TRACE (EV_INF_START / EV_INF_END) を残す。
  *
- * 推論の実行はタスク6 から。タスク5 では呼び出し元が無い。
+ * タイムアウトしたら TRACE (EV_INF_TMO) とカウンタに残し、UART に理由と ll_aton / NPU の状態
+ * (実行中の epoch block、ストリームエンジン、割り込みコントローラ) を出して E_TMOUT で戻る
+ * (assert では止めない)。ll_aton の内部状態は推論の途中のままなので、それ以降の呼び出しは
+ * E_IO を返す。実行中 epoch の中断などの後始末は未実装。
+ *
+ * ll_aton はスレッドセーフでないので、呼ぶのは NPU タスク (npu_selftest.c) だけにする。
+ * スタックを 1KB 以上使うので、usermain (初期タスク、スタック 1KB) からは呼ばない。
  */
 EXPORT ER npu_rt_run(void);
 
 /* npu_rt_run() がタイムアウトした回数 */
 EXPORT UW npu_rt_timeouts(void);
+
+/*
+ * 推論の途中を覗くためのフック (デバッグ用)。各 epoch block の終了処理 (SW の演算を含む) の
+ * 直前に、推論を実行しているタスクの中から呼ばれる。
+ *   idx: epoch block の配列の何番目か (0 始まり)、n: 配列の長さ (終端の空の block を含む)、
+ *   flags: EpochBlock_Flags_* (ll_aton_NN_interface.h)
+ * 推論の途中なので、フックの中では表示などの時間のかかる処理をしない。
+ * 設定・解除 (NULL) は npu_rt_run の外で行う。戻り値: E_OK / E_OBJ 未初期化
+ */
+typedef void (*NPU_RT_EPOCH_HOOK)(INT idx, INT n, UW flags);
+EXPORT ER npu_rt_set_epoch_hook(NPU_RT_EPOCH_HOOK hook);
+
+/*
+ * 未解決: 上のフックは実際には呼ばれない。stai_network_run (__ll_aton_stai_run、
+ * ll_aton_stai_internal.c:417-425) が推論のたびに epoch コールバックを、stai のコールバックが
+ * 無ければ NULL に設定し直すため。直すなら stai_network_set_callback() で登録する
+ * (stai が推論をまたいで保持し、同じイベント種別と epoch block を渡す)。
+ * 以下は原因を実機で確かめるための記録。
+ */
+
+/* epoch コールバックの呼び出しを記録する (TRUE で記録を空にして開始、FALSE で停止) */
+EXPORT void npu_rt_cb_log(BOOL on);
+/* 記録した呼び出し (epoch block の番号とイベント種別) を表示する */
+EXPORT void npu_rt_cb_log_show(void);
+/* いま ll_aton に npu_rt の epoch コールバックが設定されているか */
+EXPORT BOOL npu_rt_epoch_cb_installed(void);
 
 #endif	/* NPU_NPU_RT_H */
