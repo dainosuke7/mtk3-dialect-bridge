@@ -4,6 +4,7 @@
 #include "audio/audio_task.h"
 #include "extflash/extflash.h"
 #include "npu/npu_hw.h"
+#include "npu/npu_rt.h"
 #include "fault/fault.h"
 #include "trace/trace.h"
 
@@ -225,6 +226,11 @@ EXPORT INT usermain(void)
 	 * RAM の確認で D キャッシュを一時的に止めるので、音声の DMA を始める前に */
 	er = npu_hw_init();
 	tm_printf((UB*)"npu_hw_init: ret=%d\n", er);
+
+	/* NPU 推論ランタイムと AED モデルの初期化 (推論はしない)。npu_hw_init が
+	 * 成功していなければ中で何もせずに戻る */
+	er = npu_rt_init();
+	tm_printf((UB*)"npu_rt_init: ret=%d\n", er);
 
 	/* 受け入れテスト (fault.h の FAULT_TEST)。1〜4なら戻ってこない */
 	fault_test_run();

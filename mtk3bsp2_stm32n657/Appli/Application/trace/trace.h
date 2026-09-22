@@ -48,6 +48,7 @@ typedef enum {
 	EV_INF_START	= 9,	/* Phase 2 */
 	EV_INF_END	= 10,	/* Phase 2 */
 	EV_NOTIFY	= 11,	/* Phase 2 */
+	EV_INF_TMO	= 12,	/* 推論タイムアウト  arg=経過ms (255で頭打ち) */
 	EV_MAX
 } trace_ev_t;
 
