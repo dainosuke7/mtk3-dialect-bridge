@@ -17,7 +17,7 @@ STM32N6570-DK + μT-Kernel 3.0 / TRONプログラミングコンテスト2026 �
 | 段階 | 内容 | 状態 |
 |---|---|---|
 | Phase 0 | PDMマイク → MDF1 → SAI1 → WM8904 のパススルー、時間計測基盤、フォルト可視化 | 完了 |
-| Phase 1 | 外部フラッシュ上のモデル重み領域へのアクセス確認、NPU 用メモリと NPU 周辺の初期化 | 進行中 |
+| Phase 1 | 外部フラッシュ上のモデル重み領域へのアクセス確認、NPU 用メモリと NPU 周辺の初期化、NPU ランタイムと AED モデルの組み込み（初期化まで。推論は未実行） | 進行中 |
 | Phase 2 | Neural-ART NPU での音響イベント検出 | 未着手 |
 
 ## ハードウェア
@@ -78,6 +78,19 @@ STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -el $DKEL -hardRst \
 
 書き込み先は hex に埋め込まれた `0x70180000` です（署名不要）。
 
+### NPU 出力の比較用データ（PC 側）
+
+ボードの NPU 推論結果と比べるための固定入力と期待値を、ONNX Runtime で作ります。
+[uv](https://docs.astral.sh/uv/) が必要です（依存パッケージとバージョンはスクリプト内に記載）。
+ONNX モデルは上と同じリポジトリの `Projects/X-CUBE-AI/models/` にあります。
+
+```bash
+uv run scripts/aed_ref.py <STM32N6-GettingStarted-Audio>/Projects/X-CUBE-AI/models/yamnet_1024_64x96_tl_qdq_int8.onnx
+```
+
+10 クラスの出力を表示し、入力（int8 1x64x96x1、seed 固定）と期待値を
+`Appli/Application/npu/aed_test_input.h` に書き出します。
+
 ## ディレクトリ構成
 
 ```
@@ -89,7 +102,8 @@ mtk3bsp2_stm32n657/
       fault/            フォルト・未実装IRQのUART可視化
       extflash/         外部フラッシュ（重み）を XSPI2 でメモリマップ
         mx66uw1g45g/    ST のフラッシュ用コンポーネントドライバ（下表）
-      npu/              NPU 用内部メモリ・NPU・NPU キャッシュ・RIF の初期化
+      npu/              NPU 用内部メモリ・NPU・NPU キャッシュ・RIF の初期化、推論ランタイムの起動
+        st/             ST Edge AI ランタイム（ll_aton）と生成済み AED モデル（下表）
       usermain.c        タスク生成とアプリのエントリ
     Core/               CubeMX 生成コード（一部を手で追加。CLAUDE.md 参照）
     mtk3_bsp2/          μT-Kernel 3.0 BSP2（無改変）
@@ -101,7 +115,9 @@ CLAUDE.md               開発中の制約メモ
 
 ## 本プロジェクトが新規に作成した部分
 
-- `mtk3bsp2_stm32n657/Appli/Application/` 配下すべて（`extflash/mx66uw1g45g/` を除く。下表の ST 製ドライバ）
+- `mtk3bsp2_stm32n657/Appli/Application/` 配下すべて（`extflash/mx66uw1g45g/` と `npu/st/` を除く。下表の ST 製ソフトウェア）
+  - `npu/aed_test_input.h` は `scripts/aed_ref.py` の生成物（入力は乱数、期待値は ST のモデルを ONNX Runtime で実行した結果）
+- `mtk3bsp2_stm32n657/Appli/.cproject` への追加部分（NPU ランタイムのプリプロセッサ定義・インクルードパス・ライブラリ）
 - `mtk3bsp2_stm32n657/Appli/Core/` への追加部分
   - `Src/main.c`: `MX_I2C2_Init()` / `MX_SAI1_Init()` / `MX_MDF1_Init()` / `MPU_Config()`
   - `Src/stm32n6xx_it.c`: `GPDMA1_Channel0/2_IRQHandler`, `MDF1_FLT0_IRQHandler`
@@ -127,7 +143,8 @@ CLAUDE.md               開発中の制約メモ
 | MX66UW1G45G Component Driver V1.1.0 | STMicroelectronics | 外部 NOR フラッシュへのコマンド（リセット・DTR-OPI 設定・メモリマップ）。`Appli/Application/extflash/mx66uw1g45g/` | BSD-3-Clause（同梱の `LICENSE.txt`。GettingStarted-Audio の `LICENSE.md` でも「BSP Components」は BSD-3-Clause） | STM32N6-GettingStarted-Audio v2.3.0（commit 46f1f97）の `Drivers/BSP/Components/mx66uw1g45g/` | `.c`/`.h` は無改変。`mx66uw1g45g_conf.h` は同梱テンプレートからインクルードとダミーサイクル値だけ変更（変更点をファイル内に記載）。ヘッダ保持 |
 | STM32N6570-DK BSP（XSPI NOR 部分） | STMicroelectronics | `extflash.c` の初期化手順の参照元（`stm32n6570_discovery_xspi.c`） | BSD-3-Clause（GettingStarted-Audio の `LICENSE.md` で「STM32N6570-DK BSP Drivers」） | 同上の `Drivers/BSP/STM32N6570-DK/` | ファイルは同梱せず、必要な手順だけを `extflash.c` に書き起こした。参照箇所と相違点をソースのコメントに記載 |
 | STM32N6-GettingStarted-Audio アプリ部（`Int_Mem_Config()` / `NPU_Config()`）と NPU デバイス定義（`ATON.h`） | STMicroelectronics | `npu_hw.c` の初期化手順と、NPU のバージョンレジスタの番地・期待値の参照元 | SLA0044（`Projects/LICENSE.md`。GettingStarted-Audio の `LICENSE.md` で「Projects」「AI Runtime」は SLA0044） | STM32N6-GettingStarted-Audio v2.3.0（commit 46f1f97）の `Projects/GS/Src/audio_bm.c`、`Projects/Common/misc_toolbox.c`、`Middlewares/ST/AI/Npu/Devices/STM32N6xx/ATON.h` | ファイルは同梱せず、手順と定数だけを `npu_hw.c` に書き起こした。参照箇所と相違点をソースのコメントに記載。SLA0044 は ST 製デバイス上での使用に限る条件で、本機は STM32N6 上でのみ動く |
-| STM32N6xx HAL（RAMCFG / RIF / CACHEAXI 部分） | STMicroelectronics | `npu_hw.c` のレジスタ操作の参照元（`stm32n6xx_hal_ramcfg.c` / `_rif.c` / `_cacheaxi.c`） | BSD-3-Clause（GettingStarted-Audio の `LICENSE.md` で「STM32N6xx HAL/LL Drivers」） | 同上の `Drivers/STM32N6xx_HAL_Driver/`（本リポジトリの `Drivers/` には含まれていない） | ファイルは同梱せず、同じレジスタ操作を `npu_hw.c` に書き起こした。参照箇所をソースのコメントに記載 |
+| STM32N6xx HAL（RAMCFG / RIF / CACHEAXI 部分） | STMicroelectronics | `npu_hw.c` と `npu_cache_port.c` のレジスタ操作の参照元（`stm32n6xx_hal_ramcfg.c` / `_rif.c` / `_cacheaxi.c`） | BSD-3-Clause（GettingStarted-Audio の `LICENSE.md` で「STM32N6xx HAL/LL Drivers」） | 同上の `Drivers/STM32N6xx_HAL_Driver/`（本リポジトリの `Drivers/` には含まれていない） | ファイルは同梱せず、同じレジスタ操作を `npu_hw.c` / `npu_cache_port.c` に書き起こした。参照箇所をソースのコメントに記載 |
+| ST Edge AI ランタイム（ll_aton 1.1.3-262、`NetworkRuntime1200_CM55_GCC.a`、ヘッダ）と生成済み AED ネットワーク（YAMNet 1024 派生。`network.c/.h`, `stai_network.c/.h`） | STMicroelectronics | NPU 推論ランタイムと、NPU 向けにコンパイル済みのモデル。`Appli/Application/npu/st/` | SLA0044（同梱の `npu/st/LICENSE.md` は GettingStarted-Audio の `Projects/LICENSE.md` の写し。同リポジトリの `LICENSE.md` で「AI Runtime」「Projects」は SLA0044） | STM32N6-GettingStarted-Audio v2.3.0（commit 46f1f97）の `Middlewares/ST/AI/Npu/ll_aton/`、`Middlewares/ST/AI/Npu/Devices/STM32N6xx/`、`Middlewares/ST/AI/Inc/`、`Middlewares/ST/AI/Lib/GCC/ARMCortexM55/`、`Projects/X-CUBE-AI/models/`（`*.aed`） | 無改変で同梱し、ヘッダ保持。同梱しなかったもの: RTOS 用 OSAL（FreeRTOS / ThreadX / Zephyr）とそのテンプレート、HAL_CACHEAXI に依存する `npu_cache.c`（`npu_cache_port.c` で置き換え）、`Inc/` のうちビルドで参照されない 44 本。SLA0044 は ST 製デバイス上での使用に限る条件で、本機は STM32N6 上でのみ動く。オープンソースライセンスの条件下に置くことは禁止（第5項）なので、本プロジェクトのコードに付けるライセンスの対象外とする |
 
 ### Phase 2 で追加予定のもの
 
@@ -135,8 +152,7 @@ CLAUDE.md               開発中の制約メモ
 
 | 名称 | 権利者 | 機能 | 入手方法 | 同梱 |
 |---|---|---|---|---|
-| ST Edge AI ランタイム（ll_aton, NetworkRuntime*.a） | STMicroelectronics | NPU 推論ランタイム | STM32N6-GettingStarted-Audio | 検討中 |
-| STM32 AI AudioPreprocessing Library | STMicroelectronics | log-mel スペクトログラム計算 | 同上 | 検討中 |
+| STM32 AI AudioPreprocessing Library | STMicroelectronics | log-mel スペクトログラム計算 | STM32N6-GettingStarted-Audio | 検討中 |
 | CMSIS-DSP | Arm Limited | FFT 等 | 同上 | 検討中 |
 | AED モデル重み（YAMNet 1024 派生, aed_weights.hex） | STMicroelectronics | 学習済みモデル | 同上 | **含めない**（上記手順で取得） |
 
@@ -152,3 +168,6 @@ CLAUDE.md               開発中の制約メモ
 同梱している既存ソフトウェアは、それぞれ上表のライセンスに従います。
 `mtk3bsp2_stm32n657/Appli/mtk3_bsp2/` 配下は各ファイルのヘッダに記載された
 T-License（2.1 または 2.2）に従い、ヘッダは削除していません。
+`mtk3bsp2_stm32n657/Appli/Application/npu/st/` 配下は SLA0044（同梱の `LICENSE.md`）に従います。
+SLA0044 はオープンソースライセンスの条件下に置くことを禁じているため、
+本プロジェクトのコードに付けるライセンスはこのフォルダには及びません。

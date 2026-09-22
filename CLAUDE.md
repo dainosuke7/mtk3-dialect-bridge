@@ -12,6 +12,7 @@ TRONプログラミングコンテスト2026 — 屋内音お知らせ機
 場所	内容	理由
 Appli/Core/Src/main.c	MX_I2C2_Init, MX_SAI1_Init, MX_MDF1_Init, MPU_Config を追加	音声経路（WM8904制御・SAI出力・PDM入力）に必要
 Appli/Core/Inc/stm32n6xx_hal_conf.h	HAL_XSPI_MODULE_ENABLED を有効化。Appli/.project に stm32n6xx_hal_xspi.c の link を追加	アプリ側で XSPI2 を初期化して外部フラッシュをメモリマップする（Application/extflash/）ため
+Appli/.cproject（Debug 構成）	プリプロセッサ定義 LL_ATON_PLATFORM=LL_ATON_PLAT_STM32N6 / LL_ATON_OSAL=LL_ATON_OSAL_BARE_METAL / LL_ATON_RT_MODE=LL_ATON_RT_POLLING / LL_ATON_SW_FALLBACK / LL_ATON_DBG_BUFFER_INFO_EXCLUDED=1、インクルードパス ../Application/npu/st/{ll_aton,device,inc,model}、ライブラリ :NetworkRuntime1200_CM55_GCC.a（検索パス ../Application/npu/st/lib）	NPU 推論ランタイム（Application/npu/st/）のビルドに必要
 変更は可能な限り USER CODE BEGIN/END 区画の中に書く（CubeMX 再生成で消えない）
 コマンド
 ビルド: bash scripts/build.sh
@@ -26,6 +27,8 @@ COM ポートは1プロセスしか開けない。他のターミナルを閉じ
 
 CubeProgrammer は CubeIDE 同梱: C:\ST\STM32CubeIDE_*\STM32CubeIDE\plugins\*cubeprogrammer*\tools\bin 重み hex はリポジトリに入れない（ST ライセンス・容量）。取得元は README に記載
 
+NPU 比較用の参照値（PC）: uv run scripts/aed_ref.py <GettingStarted-Audio>/Projects/X-CUBE-AI/models/yamnet_1024_64x96_tl_qdq_int8.onnx → Application/npu/aed_test_input.h を上書き生成（seed 固定なので同じ内容になる）
+
 ハード
 STM32N6570-DK / Cortex-M55 600MHz + Neural-ART NPU
 内蔵ユーザFlashなし。外部フラッシュ + 署名必須
@@ -35,7 +38,7 @@ SW1(BOOT1) は 1-3 側（Development boot）
 領域	アドレス	用途
 アプリ（内部RAM）	ROM 0x34000400 +511K / RAM 0x34080000 +1536K（〜0x34200000）	BSP2 リンカ定義。コード領域 511K を超えないか監視
 AXISRAM3〜5	0x34200000〜	未使用。LCD フレームバッファ候補
-AXISRAM6	0x34350000〜（NPU は 144KB 使用）	NPU activations
+AXISRAM6	0x34350000〜（NPU は 144KB 使用）	NPU activations。番地は network.c に固定。入力 int8 6144B は 0x34350000〜、出力 float32 x10 は 0x34350410〜（入力の領域の中。推論中に入力の領域は中間結果・出力の置き場として上書きされる）
 NPU キャッシュ RAM	0x343C0000〜（256KB）	CACHEAXI 用。NPU キャッシュを有効にしている間は SRAM として使わない
 外部フラッシュ: アプリ	0x70100000〜（FSBL ソース上。起動ログは 0x71000400 と表示、未解決）	署名済みアプリ
 外部フラッシュ: 重み	0x70180000〜（3,282,785 B）	AED モデル重み
@@ -82,13 +85,21 @@ NPU のクロックは FSBL の設定のまま IC6 = PLL1/4 = 300MHz、NPU RAM�
 ST 版はブートで MEMSYSCTL MSCR.DCACTIVE が 0 になるとして、キャッシュ有効化の前に立てている。本アプリは立てていない。0 なら CCR.DC=1 でも D キャッシュは効いていない。実機の値は npu_hw_init の表示で確認する（未確認）
 ST の GettingStarted-Audio を実機でそのまま動かさない。 起動時に OTP ヒューズを不可逆に焼き、外部フラッシュの FSBL・アプリも上書きする
 ST の FreeRTOS 版コードを持ち込まない。 全 IRQ の優先度を上書きする処理がある
+NPU 推論ランタイムは Application/npu/st/（ST のファイルを無改変で同梱。SLA0044）。つなぎは npu_rt.c、ST の npu_cache.c（HAL_CACHEAXI 依存）の代わりが npu_cache_port.c。st/ 以下は編集しない。models/network_generate_report.txt は SE モデルのレポートで AED のものではない
+ll_aton は POLLING でも stai_runtime_init() の中で NPU0_IRQn を NVIC 有効にする（エラー通知用、優先度 0 = DI で止まらない）。npu_rt_init() が直後に無効へ戻している。NPU 割り込みは使わない
+ll_aton の LL_ATON_Init は NPU のバージョンが 0 の間読み直し続けるので、NPU にクロックが無いと戻らない。npu_rt_init() は npu_hw_ready() のときだけランタイムを初期化する
+ll_aton のエラー経路は newlib の printf / puts / assert を使う。newlib の malloc のヒープ（sysmem.c の _sbrk、_end から）は μT-Kernel のシステムメモリ（_end から）と重なるので使えない。npu_rt.c で __io_putchar（fault の UART 直接出力）と __assert_func（表示して fault_halt）を定義し、stdout を無バッファにして malloc を起こさない。newlib の malloc / バッファ付き stdio を使うコードを入れない
+推論のタイムアウトは ll_aton の弱いシンボル checkWatchdog() を npu_rt.c で定義して DWT で判定し、超えたら longjmp で npu_rt_run() に戻す（ll_aton は推論の途中の状態のまま。後始末はタスク6）。LL_ATON_ASSERT の中で呼ばれるので NDEBUG を定義すると効かなくなる（npu_rt.c で #error）
+POLLING の推論中は、呼び出したタスクが LL_Streng_Wait で CPU を回し続ける。それより低い優先度のタスクは推論のあいだ動けない
 PowerShell 5.1 用スクリプトは UTF-8 BOM 付きで保存する（BOM 無しだと日本語コメントで param() が壊れる）
 ビルド設定
 Appli プロジェクトは親の Drivers/STM32N6xx_HAL_Driver/Src/ を .project で個別参照している。新しい HAL を使う場合:
 stm32n6xx_hal_conf.h の HAL_xxx_MODULE_ENABLED を有効化（例外一覧に追記）
 CubeIDE で New > File > Advanced > "Link to file in the file system" から .c を追加（_ex.c も）。 追加後に .project を開き、その <link> が <locationURI>PARENT-1-PROJECT_LOC/Drivers/... になっているか確認する。 <location>C:/Users/... の絶対パスになっていたら書き直す（絶対パスだと別の場所に clone したときにビルドできない）
 Clean → Build
-HAL_RAMCFG / HAL_RIF / HAL_CACHEAXI は Drivers/ に .c も .h も無い。 使わずにレジスタを直接操作する（Application/npu/npu_hw.c。手順は ST の HAL を参照してコメントに記載）
+HAL_RAMCFG / HAL_RIF / HAL_CACHEAXI は Drivers/ に .c も .h も無い。 使わずにレジスタを直接操作する（Application/npu/npu_hw.c と npu_cache_port.c。手順は ST の HAL を参照してコメントに記載）
+NPU ランタイムの定義・インクルードパス・ライブラリは .cproject の Debug 構成に直接書いた（例外一覧）。Debug（-O0）のままでコード領域 225,760B / 511KB（2026-09-22、初期化まで。推論を呼ぶと数KB増える）
+.cproject を CubeIDE の外で書き換えたら、CubeIDE でプロジェクトを Refresh（F5）してからビルドし、Debug/ の mk を作り直させる（scripts/build.sh は既存の mk を使うだけで .cproject を読まない）
 Application/ 配下に新規ファイル・フォルダを作ったら CubeIDE でプロジェクトを Refresh（F5）
 Debug/ 配下の mk 系は CubeIDE が生成する。手動編集しない。ビルド対象の追加・除外は GUI で行い .cproject に永続化する
 Git
