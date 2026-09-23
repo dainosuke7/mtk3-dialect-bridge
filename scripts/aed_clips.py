@@ -41,10 +41,10 @@ import wave
 from pathlib import Path
 
 import numpy as np
-import onnx
-import onnxruntime as ort
-from onnx import numpy_helper
-from scipy.signal import resample_poly
+
+# onnx / onnxruntime / scipy は使う関数の中で import する。このファイルは
+# scripts/aed_play_test.py からクリップ表とメタデータの読み込みだけを取るために
+# import されるので、そのときに重い依存を要求しないようにしている
 
 # ---------------------------------------------------------------------------
 # 前処理のパラメータ。ST の Projects/Dpu/ai_model_config.h.aed と一致するかを起動時に確かめる
@@ -224,9 +224,36 @@ def logmel_q8(x: np.ndarray, win: np.ndarray, fb: np.ndarray,
     return out
 
 
+# ---------------------------------------------------------------------------
+# ESC-50 のメタデータ (scripts/aed_play_test.py もここを使う)
+
+def read_meta(esc50: Path) -> dict[str, dict]:
+    """meta/esc50.csv を filename -> 行 の辞書にする。"""
+    path = esc50 / "meta" / "esc50.csv"
+    if not path.exists():
+        sys.exit(f"{path} が無い (ESC-50 のリポジトリを指すこと)")
+    with open(path, encoding="utf-8") as f:
+        return {r["filename"]: r for r in csv.DictReader(f)}
+
+
+def clip_path(meta: dict[str, dict], fn: str, label: str, esc50: Path) -> Path:
+    """CLIPS の1本がメタデータ (クラス・ESC-10・fold 5) と合っているか確かめ、wav の場所を返す。"""
+    r = meta.get(fn)
+    if r is None or r["category"] != label or r["esc10"] != "True":
+        sys.exit(f"{fn}: ESC-50 のメタデータと合わない")
+    if r["fold"] != "5":
+        sys.exit(f"{fn}: fold {r['fold']} (このスクリプトは fold 5 を前提にしている)")
+    path = esc50 / "audio" / fn
+    if not path.exists():
+        sys.exit(f"{path} が無い (ESC-50 の audio/ を取得すること)")
+    return path
+
+
 def read_wav_16k(path: Path) -> tuple[np.ndarray, float, float]:
     """ESC-50 の wav (44.1kHz mono int16) を 16kHz int16 にし、先頭 15600 サンプルと、
     先頭部分・全体の RMS (dBFS) を返す"""
+    from scipy.signal import resample_poly
+
     with wave.open(str(path)) as w:
         if (w.getframerate(), w.getnchannels(), w.getsampwidth()) != (44100, 1, 2):
             sys.exit(f"{path}: 44.1kHz mono 16bit でない")
@@ -240,11 +267,13 @@ def read_wav_16k(path: Path) -> tuple[np.ndarray, float, float]:
 # ---------------------------------------------------------------------------
 # ONNX
 
-def onnx_input(model: onnx.ModelProto) -> tuple[str, np.float32, int]:
+def onnx_input(model) -> tuple[str, np.float32, int]:
     """入力名と、入力直後 (Transpose の次) の QuantizeLinear の scale / zero_point。"""
+    from onnx import numpy_helper
+
     g = model.graph
     inits = {t.name: numpy_helper.to_array(t) for t in g.initializer}
-    consumers: dict[str, list[onnx.NodeProto]] = {}
+    consumers: dict[str, list] = {}
     for n in g.node:
         for x in n.input:
             consumers.setdefault(x, []).append(n)
@@ -257,7 +286,9 @@ def onnx_input(model: onnx.ModelProto) -> tuple[str, np.float32, int]:
     sys.exit("入力の直後に QuantizeLinear が無い")
 
 
-def sessions(model_bytes: bytes) -> dict[str, ort.InferenceSession]:
+def sessions(model_bytes: bytes) -> dict:
+    import onnxruntime as ort
+
     out = {}
     for mode, level in (("ort", ort.GraphOptimizationLevel.ORT_ENABLE_ALL),
                         ("noopt", ort.GraphOptimizationLevel.ORT_DISABLE_ALL)):
@@ -277,6 +308,8 @@ def c_rows(values, per_line: int, indent: str = "\t\t") -> str:
 
 def write_ref_header(clips: list[dict], sha256: str, scale: np.float32, zp: int, tables_note: str) -> list[dict]:
     """前処理をボードで突き合わせる2本 (生 PCM + PC の int8 テンソル + PC の1位) を出す。"""
+    import onnxruntime as ort
+
     by_file = {c["file"]: c for c in clips}
     ref = []
     for fn in REF_CLIPS:
@@ -368,6 +401,8 @@ static const char *const aed_ref_class_names[AED_REF_CLASSES] = {{
 
 
 def write_header(clips: list[dict], sha256: str, scale: np.float32, zp: int, tables_note: str) -> None:
+    import onnxruntime as ort
+
     lines = [f"\t{{ /* {c['file']} ({c['label']}) */\n" + c_rows(c["q"].reshape(-1), 32) + "\n\t},"
              for c in clips]
     arr = lambda key, fmt: ", ".join(fmt(c[key]) for c in clips)
@@ -425,6 +460,8 @@ static const float aed_clip_prob_noopt[AED_CLIP_COUNT] = {{
 
 
 def main() -> None:
+    import onnx
+
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("gs_audio", type=Path, help="STM32N6-GettingStarted-Audio (v2.3.0) のディレクトリ")
     ap.add_argument("esc50", type=Path, help="ESC-50 のディレクトリ")
@@ -441,7 +478,7 @@ def main() -> None:
     inv_scale = np.float32(1.0) / scale        # ai_dpu.c:170 の 1 / scale (ST は FP16 に丸める)
     sess = sessions(blob)
 
-    meta = {r["filename"]: r for r in csv.DictReader(open(args.esc50 / "meta" / "esc50.csv", encoding="utf-8"))}
+    meta = read_meta(args.esc50)
 
     print(f"ST config  : {CONFIG_REL} matches (16kHz, {N_MELS} mel x {N_COLS} col, hop {HOP}, "
           f"win {WIN}, nfft {N_FFT}, HTK {FMIN}-{FMAX}Hz, magnitude, log)")
@@ -453,12 +490,7 @@ def main() -> None:
     clips = []
     for label in CLASSES:
         for fn in CLIPS[label]:
-            r = meta.get(fn)
-            if r is None or r["category"] != label or r["esc10"] != "True":
-                sys.exit(f"{fn}: ESC-50 のメタデータと合わない")
-            path = args.esc50 / "audio" / fn
-            if not path.exists():
-                sys.exit(f"{path} が無い (ESC-50 の audio/ を取得すること)")
+            path = clip_path(meta, fn, label, args.esc50)
             x, lvl, lvl_all = read_wav_16k(path)
             warn = " (!) quiet start" if lvl < lvl_all - LEVEL_MARGIN_DB else ""
             q = logmel_q8(x, win, fb, inv_scale, zp)
