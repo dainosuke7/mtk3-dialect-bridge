@@ -20,7 +20,8 @@
                 本来は unknown か通知対象外になるべきもの
 
 クリップはピークを -3dBFS にそろえて鳴らす (ESC-50 は録音ごとに音量が違うため)。
-元の RMS と掛けたゲインはログに残す。
+元の RMS と掛けたゲインはログに残す。正規化はメモリ上で行い、winsound の SND_MEMORY で
+同期再生する (SND_ASYNC は winsound が許さない。PLAY_FLAGS のところに理由)。
 
 使い方 (uv が依存パッケージを用意する):
     uv run scripts/aed_play_test.py <ESC-50>
@@ -76,6 +77,13 @@ CLIP_LEN_S = 5.0		# ESC-50 のクリップは全部5秒
 MANUAL_NOTICE_S = 3.0		# 生活音の予告を出すタイミング (何秒前か)
 TARGET_PEAK_DBFS = -3.0		# 鳴らす前にピークをここにそろえる
 
+# メモリから鳴らすときのフラグ。SND_ASYNC は付けられない:
+# winsound は SND_MEMORY と SND_ASYNC を同時に使うと
+# RuntimeError "Cannot play asynchronously from memory" を投げる
+# (参照カウントの面倒を避けるため CPython が禁じている)。
+# 同期なので再生の間ずっと PlaySound の中にいて、渡したバイト列は clips が持ったまま生きている
+PLAY_FLAGS = 0 if winsound is None else (winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+
 # 鳴らすクリップの順 (1巡5本 x REPEAT)。clock_tick は通知対象外のクラスで、
 # 通知対象のクラスと同じように扱われないことを確かめるために入れる
 PLAY_ORDER = ["dog", "crying_baby", "crackling_fire", "sneezing", "clock_tick"]
@@ -100,14 +108,20 @@ def row(elapsed: float, clock: datetime, tag: str, detail: str) -> str:
 
 
 def countdown(t0: float, target: float, text: str) -> None:
-    """開始から target 秒になるまで待つ。同じ行に「text 残り N 秒」を出し続ける。"""
+    """開始から target 秒になるまで待つ。同じ行に「text 残り N 秒」を出し続ける。
+
+    端末以外 (ファイルへのリダイレクトやパイプ) では上書きが効かず全部流れてしまうので出さない。
+    """
+    tty = sys.stdout.isatty()
     while True:
         left = t0 + target - time.monotonic()
         if left <= 0:
             break
-        print(f"\r  {text} 残り {left:4.0f} 秒 ", end="", flush=True)
+        if tty:
+            print(f"\r  {text} 残り {left:4.0f} 秒 ", end="", flush=True)
         time.sleep(min(left, 0.2))
-    print("\r" + " " * 64 + "\r", end="", flush=True)	# 行を消す
+    if tty:
+        print("\r" + " " * 64 + "\r", end="", flush=True)	# 行を消す
 
 
 def load_clip(path: Path) -> tuple[bytes, float, float]:
@@ -150,6 +164,8 @@ def main() -> None:
     ap.add_argument("--skip-manual", action="store_true", help="クラス外の生活音の区間を飛ばす")
     args = ap.parse_args()
 
+    # 同期再生なので PlaySound は再生時間ぶん戻ってこない。しかも少し余分にかかる
+    # (実測: 5.00 秒の音で 5.5 秒)。間隔をクリップ長ぎりぎりにすると毎回わずかに遅れる
     if args.interval < CLIP_LEN_S:
         sys.exit(f"--interval は {CLIP_LEN_S} 秒以上にすること (クリップが重なる)")
     if winsound is None and not args.dry_run:
@@ -173,6 +189,20 @@ def main() -> None:
             wav, rms_db, gain_db = load_clip(clip_path(meta, fn, label, args.esc50))
             clips.append({"label": label, "file": fn, "wav": wav,
                           "rms_db": rms_db, "gain_db": gain_db})
+
+    # 鳴らせるかを先に試す (無音 0.1 秒なので音は出ない)。
+    # 試験を始めてから「1本も鳴っていなかった」と気付くのを避ける
+    if not args.dry_run:
+        silent = io.BytesIO()
+        with wave.open(silent, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * 4410)
+        try:
+            winsound.PlaySound(silent.getvalue(), PLAY_FLAGS)
+        except RuntimeError as e:
+            sys.exit(f"再生できない: {e}")
 
     manual = [] if args.skip_manual else MANUAL_ITEMS * MANUAL_REPEAT
 
@@ -236,15 +266,18 @@ def main() -> None:
         out(row(time.monotonic() - t0, datetime.now(), "PHASE", "clips"))
         for i, c in enumerate(clips):
             countdown(t0, t_clips + args.interval * i, f"次: {c['label']}")
+            print(f"  再生: {c['label']} {c['file']}")
 
-            # 時刻は PlaySound の直前に取る。非同期で鳴らして、待つのは次の countdown に任せる
-            # (SND_MEMORY のバッファは clips が持っているので再生中に消えない)
+            # 時刻は PlaySound の直前に取る。ここから再生開始までに I/O を挟まない
+            # (ログは鳴らし終わってから書く。時刻は上で取った値を使う)
             el, clock = time.monotonic() - t0, datetime.now()
             if not args.dry_run:
                 try:
-                    winsound.PlaySound(c["wav"], winsound.SND_MEMORY | winsound.SND_ASYNC)
+                    winsound.PlaySound(c["wav"], PLAY_FLAGS)
                 except RuntimeError as e:
-                    note(f"[+{el:.1f}s] PlaySound failed: {e}")
+                    # 鳴らないまま試験を続けても意味が無いので止める
+                    out(row(el, clock, "CLIP", f"{c['label']} {c['file']} PLAY FAILED: {e}"))
+                    sys.exit(f"再生できない: {e}")
             out(row(el, clock, "CLIP", f"{c['label']} {c['file']}"
                     f" rms={c['rms_db']:.1f}dBFS gain={c['gain_db']:+.1f}dB"))
 
