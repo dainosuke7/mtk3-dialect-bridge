@@ -14,7 +14,12 @@
  * (tm_sprintf は上限を取らないので、スタックに置く行バッファには使えない)。
  */
 
-#define LOG_DEPTH	(32)	/* 溜められる行数の目安。UART が遅いので深めにする */
+/*
+ * 溜められる行数の目安。UART が遅い (115200bps で1行 10ms 前後) ので深めにする。
+ * 一度にまとまって出るのは前処理セルフテストのブロックで、本文 20 行ほど + 区切り 4 行。
+ * 推論タスク (優先度15) がその間 CPU を離さないので、全部キューに入る必要がある
+ */
+#define LOG_DEPTH	(48)
 
 LOCAL ID	log_mbfid = 0;
 LOCAL T_CMBF	cmbf_log = {
@@ -201,15 +206,18 @@ EXPORT ER log_send(void *msg, INT body_len)
 	return (er < E_OK) ? E_QOVR : E_OK;
 }
 
-EXPORT void log_printf(const char *fmt, ...)
+/* 1行を組んで渡す。add_nl なら末尾に改行を足す (見出し用) */
+LOCAL void log_vout(const char *fmt, va_list ap, BOOL add_nl)
 {
 	LOG_MSG	m;
-	va_list	ap;
 	INT	len;
 
-	va_start(ap, fmt);
-	len = vfmt((char *)m.body, LOG_TEXT_MAX, fmt, ap);
-	va_end(ap);
+	len = vfmt((char *)m.body, add_nl ? (LOG_TEXT_MAX - 1) : LOG_TEXT_MAX, fmt, ap);
+	if(add_nl) {
+		m.body[len]     = '\n';
+		m.body[len + 1] = '\0';
+		len++;
+	}
 
 	if(log_mbfid <= 0) {
 		/* レポータがまだ無い (起動直後)。その場で出す */
@@ -219,6 +227,39 @@ EXPORT void log_printf(const char *fmt, ...)
 
 	m.type = LOG_TYPE_TEXT;
 	(void)log_send(&m, len + 1);		/* NUL も送る */
+}
+
+EXPORT void log_printf(const char *fmt, ...)
+{
+	va_list	ap;
+
+	va_start(ap, fmt);
+	log_vout(fmt, ap, FALSE);
+	va_end(ap);
+}
+
+LOCAL void log_rule(void)
+{
+	log_printf(LOG_RULE "\n");
+}
+
+EXPORT void log_block_begin(const char *fmt, ...)
+{
+	va_list	ap;
+
+	log_rule();
+	log_rule();
+	va_start(ap, fmt);
+	log_vout(fmt, ap, TRUE);
+	va_end(ap);
+	log_rule();
+	log_rule();
+}
+
+EXPORT void log_block_end(void)
+{
+	log_rule();
+	log_rule();
 }
 
 EXPORT INT log_recv(LOG_MSG *msg, TMO tmout)

@@ -61,6 +61,21 @@ EXPORT BOOL log_ready(void);
 EXPORT void log_printf(const char *fmt, ...);
 
 /*
+ * 計測にかかわる出力を囲む区切り (目で見つけやすくし、ログから抜き出す目印にする)。
+ *
+ *   log_block_begin("TAP TOTAL win=%u", n)  区切り2行 + 見出し + 区切り2行
+ *   log_printf(...)                         本文 (書式と数値は囲む前と同じまま)
+ *   log_block_end()                         区切り2行
+ *
+ * 見出しだけで本文が無いもの (READY) は log_block_begin() だけを呼ぶ。
+ * 見出しに改行は入れない (log_block_begin が足す)
+ */
+#define LOG_RULE	"===================================="
+
+EXPORT void log_block_begin(const char *fmt, ...);
+EXPORT void log_block_end(void);
+
+/*
  * 組み立て済みのメッセージを渡す。msg は先頭が LOG_MSG と同じ 2 語 (type, t_send) で
  * 始まる構造体、body_len は body の長さ。t_send は log_send が入れる。
  * 戻り値: E_OK / E_QOVR いっぱいで捨てた / E_OBJ まだ log_init していない

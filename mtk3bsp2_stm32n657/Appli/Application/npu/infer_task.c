@@ -462,6 +462,7 @@ LOCAL void pp_one(INT k, BOOL npu_ok, UW *n_same, UW *n_diff, INT *max_abs, UW *
 			t_flt, aed_ref_class_names[t_flt], x10k(aed_ref_prob_noopt[k]));
 }
 
+/* 本文は log_block_begin / log_block_end で囲む (呼び出し側の pp_step が囲む) */
 LOCAL void pp_report(BOOL npu_ok)
 {
 	UW	n_same, n_diff, n_big, s_same = 0, s_diff = 0, s_big = 0;
@@ -529,7 +530,9 @@ LOCAL void pp_step(BOOL npu_ok)
 	if(npu_ok && !pt_reported) return;
 #endif
 
+	log_block_begin("PREPROC TEST");
 	pp_report(npu_ok);
+	log_block_end();
 	pp_done = TRUE;
 
 	/*
@@ -567,9 +570,8 @@ LOCAL void show_ready_banner(BOOL npu_ok)
 	if(npu_ok && !pt_reported) return;	/* 予行がまだ (NPU が無いときは待たない) */
 #endif
 
-	log_printf("====================================\n");
-	log_printf("READY  起動確認おわり。ここから本番\n");
-	log_printf("====================================\n");
+	/* 本文が無いので log_block_end は呼ばない (見出しだけのブロック) */
+	log_block_begin("READY  起動確認おわり。ここから本番");
 	ready_shown = TRUE;
 }
 
@@ -621,8 +623,10 @@ LOCAL void task_infer(INT stacd, void *exinf)
 			 * head > 0 だけを見ると偽の final が出る)
 			 */
 			if(!idle && have_window && !trace_muted()) {
+				log_block_begin("FINAL");
 				log_printf("tap: no window for %d ms (audio stopped?)\n", WIN_WAIT_MS);
 				show_summary("final");
+				log_block_end();
 				idle = TRUE;
 			}
 			continue;
@@ -671,7 +675,11 @@ LOCAL void task_infer(INT stacd, void *exinf)
 						notify_class_name(last_cls), last_p100 / 100,
 						last_p100 % 100, pp_us, inf_us);
 			}
-			if(((info.seq + 1U) % SUMMARY_EVERY) == 0) show_summary("total");
+			if(((info.seq + 1U) % SUMMARY_EVERY) == 0) {
+				log_block_begin("TAP TOTAL win=%u", info.seq);
+				show_summary("total");
+				log_block_end();
+			}
 		}
 	}
 }

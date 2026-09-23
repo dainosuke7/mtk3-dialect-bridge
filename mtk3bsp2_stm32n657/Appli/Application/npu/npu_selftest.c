@@ -28,6 +28,7 @@
 #define NPU_HAVE_CLIPS		(0)
 #endif
 #include "../trace/trace.h"	// NOW(), trace_cyc_to_us()
+#include "../trace/log.h"	// log_block_begin / log_block_end (レポータ前なので直接出る)
 
 /*
  * 固定入力による推論の確認 (Phase 1 タスク6)。呼ぶのは推論タスク (infer_task.c) だけ
@@ -425,7 +426,8 @@ EXPORT BOOL npu_selftest(void)
 	/* softmax 直前の int8 ロジットを PC と比べる (推論をもう1回。参考値) */
 	(void)logits_check();
 
-	/* 判定: ESC-10 の実録音で1位を PC と比べる */
+	/* 判定: ESC-10 の実録音で1位を PC と比べる。結果は区切りで囲む (計測の目印) */
+	log_block_begin("NPU SELFTEST");
 #if NPU_HAVE_CLIPS
 	pass = clips_check();
 	tm_printf((UB*)"npu selftest %s (judged by the clip test)\n", pass ? "PASS" : "FAIL");
@@ -439,6 +441,7 @@ EXPORT BOOL npu_selftest(void)
 			" the preproc test judges 2 clips instead)\n");
 	tm_printf((UB*)"npu selftest NOT JUDGED\n");
 #endif
+	log_block_end();
 
 	/* 同じ入力で連続実行 */
 	tm_printf((UB*)"npu repeat x%d (same input):\n", ST_REPEAT);

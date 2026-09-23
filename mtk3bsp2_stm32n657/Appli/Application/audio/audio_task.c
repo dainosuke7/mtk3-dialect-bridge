@@ -472,6 +472,9 @@ LOCAL ER passthrough_test(void)
 	passthrough_active = 0;
 	fifo_feed_active   = 0;
 
+	/* ここから最終集計。区切りで囲んでログから拾いやすくする */
+	log_block_begin("PASSTHROUGH STOPPED");
+
 	err = mdf_in_stop_dma();
 	if(err < E_OK) log_printf("MDF1 acquisition stop FAIL (err=%d)\n", err);
 
@@ -486,6 +489,7 @@ LOCAL ER passthrough_test(void)
 			" under=%u over=%u)\n",
 			dma_half_count, dma_cplt_count, mdf_cb_total, mdf_err_count,
 			pt_underrun, pt_overrun);
+	log_block_end();
 
 	return E_OK;
 }
