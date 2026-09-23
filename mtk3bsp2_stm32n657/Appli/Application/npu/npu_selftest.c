@@ -41,8 +41,6 @@
  *      - 乱数入力で10回連続。毎回の推論時間と、最初の推論の出力との差
  *   npu_selftest_run_fixed():
  *      乱数入力で1回推論し、最初の推論の出力と比べる (パススルー中の推論の予行に使う)
- *   npu_selftest_infer():
- *      与えた入力で1回推論する (タスク8 の前処理セルフテストが使う)
  */
 
 /*
@@ -141,21 +139,12 @@ LOCAL void show_head(const char *label, const B *p)
 LOCAL ER run_once(const B *src, float *out, UW *us, B *head_before, UW *in_diff)
 {
 	B		*in = npu_rt_input();
-	const float	*o  = npu_rt_output();
 	UW		t0, n;
 	INT		i;
 	ER		er;
 
-	memcpy(in, src, NPU_RT_IN_BYTES);
-
-	/*
-	 * CPU が書いた入力を RAM に出し (clean)、同じ範囲のラインをキャッシュから捨てる
-	 * (invalidate)。入力の領域 (0x34350000〜) は推論中に NPU と SW epoch が中間結果と
-	 * 出力の置き場に使うので、clean だけだとキャッシュに残ったラインが後で NPU の書いた
-	 * 値を隠す。ST も同じ操作 (preproc_dpu.c:144)。先頭は 32B 境界 (npu_rt_init で確認済み)、
-	 * 長さ 6144 は 32 の倍数
-	 */
-	SCB_CleanInvalidateDCache_by_Addr((volatile void *)in, NPU_RT_IN_BYTES);
+	/* 入力を写して D キャッシュを clean+invalidate する (理由は npu_rt.c の npu_rt_load_input) */
+	npu_rt_load_input(src);
 
 	/*
 	 * ラインを捨てた後なので、ここで読むと RAM の中身が見える。読んだラインはクリーンな
@@ -174,12 +163,7 @@ LOCAL ER run_once(const B *src, float *out, UW *us, B *head_before, UW *in_diff)
 	*us = trace_cyc_to_us((UW)(NOW() - t0));
 	if(er != E_OK) return er;
 
-	/*
-	 * 出力 (softmax 後の float x10、0x34350410〜) は最後の SW epoch が CPU で書き、
-	 * network.c がその後 clean している。CPU のキャッシュが正しい値を持っているので
-	 * invalidate は要らない (0x34350410 は 32B 境界でもなく、invalidate すると隣を巻き込む)
-	 */
-	for(i = 0; i < NPU_RT_OUT_CLASSES; i++) out[i] = o[i];
+	npu_rt_read_output(out);
 	return E_OK;
 }
 
@@ -483,18 +467,6 @@ EXPORT BOOL npu_selftest(void)
 		tm_printf((UB*)"  no run completed\n");
 	}
 	return TRUE;
-}
-
-/* ---------------------------------------------------------------- */
-/* 任意の入力で1回推論する (前処理セルフテスト用)                       */
-/* ---------------------------------------------------------------- */
-
-EXPORT ER npu_selftest_infer(const B *in, float *out, UW *us)
-{
-	*us = 0;
-	if(!npu_rt_ready() || npu_rt_input() == NULL) return E_OBJ;
-
-	return run_once(in, out, us, NULL, NULL);
 }
 
 /* ---------------------------------------------------------------- */

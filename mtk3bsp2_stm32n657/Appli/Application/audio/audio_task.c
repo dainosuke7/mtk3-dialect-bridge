@@ -10,6 +10,7 @@
 #include "tap_ring.h"
 #include "audio_task.h"
 #include "../trace/trace.h"
+#include "../trace/log.h"	// log_printf() (UART に出すのはレポータタスクだけ)
 
 LOCAL void task_audio(INT stacd, void *exinf);	// task execution function
 LOCAL ID	tskid_audio;			// Task ID number
@@ -402,18 +403,18 @@ LOCAL ER passthrough_test(void)
 
 	err = wm8904_dac_unmute();
 	if(err < E_OK) {
-		tm_printf((UB*)"WM8904 DAC unmute FAIL (err=%d)\n", err);
+		log_printf("WM8904 DAC unmute FAIL (err=%d)\n", err);
 		return err;
 	}
-	tm_printf((UB*)"WM8904 DAC unmute OK\n");
+	log_printf("WM8904 DAC unmute OK\n");
 
 	/* 出力経路の確認を兼ねて、まずサイン波を鳴らす */
 	err = sai_out_transmit_dma(dma_buf, DMA_TOTAL_SAMPLES);
 	if(err < E_OK) {
-		tm_printf((UB*)"SAI1 DMA start FAIL (err=%d)\n", err);
+		log_printf("SAI1 DMA start FAIL (err=%d)\n", err);
 		return err;
 	}
-	tm_printf((UB*)"SAI1 DMA start OK (440Hz sine, output path check)\n");
+	log_printf("SAI1 DMA start OK (440Hz sine, output path check)\n");
 	tk_dly_tsk(PT_BEEP_MS);
 
 	/* マイク取り込み開始。FIFOへの投入はここから有効にしておく
@@ -421,12 +422,12 @@ LOCAL ER passthrough_test(void)
 	fifo_feed_active = 1;
 	err = mdf_in_start_dma();
 	if(err < E_OK) {
-		tm_printf((UB*)"MDF1 acquisition start FAIL (err=%d)\n", err);
+		log_printf("MDF1 acquisition start FAIL (err=%d)\n", err);
 		fifo_feed_active = 0;
 		(void)sai_out_stop_dma();
 		return err;
 	}
-	tm_printf((UB*)"MDF1 acquisition start OK\n");
+	log_printf("MDF1 acquisition start OK\n");
 
 	for(waited = 0; waited < 100; waited++) {	// 最大1秒待つ
 		if(pcm_fifo_count() >= PT_PREFILL_SAMPLES) break;
@@ -435,7 +436,7 @@ LOCAL ER passthrough_test(void)
 	if(pcm_fifo_count() < PT_PREFILL_SAMPLES) {
 		/* mdf_cb=0ならMDFのDMA/割り込みが動いていない。
 		 * mdf_cb>0なのにfifoが増えないならFIFO投入側の問題。 */
-		tm_printf((UB*)"Passthrough prefill TIMEOUT (fifo=%u mdf_cb=%u over=%u)\n",
+		log_printf("Passthrough prefill TIMEOUT (fifo=%u mdf_cb=%u over=%u)\n",
 				pcm_fifo_count(), mdf_cb_total, pt_overrun);
 		fifo_feed_active = 0;
 		(void)mdf_in_stop_dma();
@@ -447,20 +448,21 @@ LOCAL ER passthrough_test(void)
 	(void)trace_rate_start(pcm_fifo_count);
 
 	passthrough_active = 1;
-	tm_printf((UB*)"Passthrough ACTIVE (mic -> headphone, prefill=%u samples, mdf_cb=%u)\n",
+	log_printf("Passthrough ACTIVE (mic -> headphone, prefill=%u samples, mdf_cb=%u)\n",
 			pcm_fifo_count(), mdf_cb_total);
-	tm_printf((UB*)"Speak into the onboard mics; you should hear it and avg_abs should rise.\n");
+	log_printf("Speak into the onboard mics; you should hear it and avg_abs should rise.\n");
 
 	for(n = 0; n < PT_REPORT_COUNT; n++) {
 		tk_dly_tsk(PT_REPORT_INTERVAL_MS);
 		mic_stat_take(&st);
 		if(trace_muted()) continue;		/* ダンプ中は黙る */
 		if(st.samples == 0) {
-			tm_printf((UB*)"  pt[%d]: no mic data (mdf_cb=%u)\n", n, mdf_cb_total);
+			log_printf("  pt[%d]: no mic data (mdf_cb=%u)\n", n, mdf_cb_total);
 			continue;
 		}
 		avg_abs = st.sum_abs / st.samples;
-		tm_printf((UB*)"  pt[%d]: min=%d max=%d avg_abs=%u | fifo=%u under=%u over=%u late=%u mdf_cb=%u\n",
+		log_printf("  pt[%d]: min=%d max=%d avg_abs=%u | fifo=%u under=%u over=%u late=%u"
+				" mdf_cb=%u mdf_err=%u\n",
 				n, st.min, st.max, avg_abs,
 				pcm_fifo_count(), pt_underrun, pt_overrun, pt_late, mdf_cb_total, mdf_err_count);
 	}
@@ -471,13 +473,19 @@ LOCAL ER passthrough_test(void)
 	fifo_feed_active   = 0;
 
 	err = mdf_in_stop_dma();
-	if(err < E_OK) tm_printf((UB*)"MDF1 acquisition stop FAIL (err=%d)\n", err);
+	if(err < E_OK) log_printf("MDF1 acquisition stop FAIL (err=%d)\n", err);
 
 	err = sai_out_stop_dma();
-	if(err < E_OK) tm_printf((UB*)"SAI1 DMA stop FAIL (err=%d)\n", err);
+	if(err < E_OK) log_printf("SAI1 DMA stop FAIL (err=%d)\n", err);
 
-	tm_printf((UB*)"Passthrough stopped (sai_cb half=%u cplt=%u, mdf_cb=%u, under=%u over=%u)\n",
-			dma_half_count, dma_cplt_count, mdf_cb_total, mdf_err_count, pt_underrun, pt_overrun);
+	/*
+	 * mdf_err の %u が抜けていて、under= に mdf_err_count、over= に pt_underrun が
+	 * 出ていた (タスク9 で log_printf に format 属性を付けて見つけた)
+	 */
+	log_printf("Passthrough stopped (sai_cb half=%u cplt=%u, mdf_cb=%u mdf_err=%u,"
+			" under=%u over=%u)\n",
+			dma_half_count, dma_cplt_count, mdf_cb_total, mdf_err_count,
+			pt_underrun, pt_overrun);
 
 	return E_OK;
 }
@@ -490,28 +498,28 @@ LOCAL void task_audio(INT stacd, void *exinf)
 	do {
 		err = wm8904_read_device_id(&devid);
 		if(err < E_OK) {
-			tm_printf((UB*)"WM8904 I2C2 read error = %d\n", err);
+			log_printf("WM8904 I2C2 read error = %d\n", err);
 			break;
 		}
-		tm_printf((UB*)"WM8904 Device ID = 0x%04X\n", devid);
+		log_printf("WM8904 Device ID = 0x%04X\n", devid);
 		if(devid != WM8904_EXPECT_ID) {
-			tm_printf((UB*)"WM8904 unexpected Device ID (expect 0x%04X)\n", WM8904_EXPECT_ID);
+			log_printf("WM8904 unexpected Device ID (expect 0x%04X)\n", WM8904_EXPECT_ID);
 			break;
 		}
 
 		err = wm8904_init_headphone_16k(WM8904_TEST_VOLUME);
 		if(err < E_OK) {
-			tm_printf((UB*)"WM8904 init failed (err=%d)\n", err);
+			log_printf("WM8904 init failed (err=%d)\n", err);
 			break;
 		}
 
 		/* SAI1本体・Tx DMAチャネルはmain.cのMX_SAI1_Init()で初期化済み */
 		err = sai_out_init_check();
 		if(err < E_OK) {
-			tm_printf((UB*)"SAI1 peripheral init FAIL (see main.c MX_SAI1_Init)\n");
+			log_printf("SAI1 peripheral init FAIL (see main.c MX_SAI1_Init)\n");
 			break;
 		}
-		tm_printf((UB*)"SAI1 peripheral init OK (kerclk=%u mckdiv=%u -> Fs=%uHz)\n",
+		log_printf("SAI1 peripheral init OK (kerclk=%u mckdiv=%u -> Fs=%uHz)\n",
 				sai_out_kernel_clock(), sai_out_mckdiv(),
 				(sai_out_mckdiv() != 0)
 					? (sai_out_kernel_clock() / (sai_out_mckdiv() * 256))
@@ -523,11 +531,11 @@ LOCAL void task_audio(INT stacd, void *exinf)
 			/* step: 1=RCC_OscConfig(PLL3), 2=RCCEx_PeriphCLKConfig(IC8),
 			 * 3=GPIO設定, 4=HAL_MDF_Init, 5=Rx DMA設定.
 			 * hal_status: HAL_OK=0, HAL_ERROR=1, HAL_BUSY=2, HAL_TIMEOUT=3 */
-			tm_printf((UB*)"MDF1 (PDM mic) init FAIL at step=%u hal_status=%u\n",
+			log_printf("MDF1 (PDM mic) init FAIL at step=%u hal_status=%u\n",
 					mdf_in_init_step(), mdf_in_init_hal_status());
 			break;
 		}
-		tm_printf((UB*)"MDF1 (PDM mic) init OK (step=%u)\n", mdf_in_init_step());
+		log_printf("MDF1 (PDM mic) init OK (step=%u)\n", mdf_in_init_step());
 
 		(void)passthrough_test();
 	} while(0);

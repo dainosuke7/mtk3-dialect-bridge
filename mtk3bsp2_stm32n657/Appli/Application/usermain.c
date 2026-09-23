@@ -5,6 +5,7 @@
 #include "extflash/extflash.h"
 #include "npu/npu_hw.h"
 #include "npu/infer_task.h"
+#include "aed/notify.h"
 #include "audio/tap_ring.h"
 #include "fault/fault.h"
 #include "trace/trace.h"
@@ -156,36 +157,18 @@ LOCAL T_CTSK ctsk_1 = {				// Task creation information
 	.tskatr		= TA_HLNG | TA_RNG3,
 };
 
-LOCAL void task_2(INT stacd, void *exinf);	// task execution function
-LOCAL ID	tskid_2;			// Task ID number
-LOCAL T_CTSK ctsk_2 = {				// Task creation information
-	.itskpri	= 10,
-	.stksz		= 1024,
-	.task		= task_2,
-	.tskatr		= TA_HLNG | TA_RNG3,
-};
 
+/*
+ * 生存表示。緑 LED (PO1) を 500ms ごとに反転するだけ。
+ * タスク9 で表示は止めた (UART はレポータタスクに集約し、毎秒の "task 1" は出さない)。
+ * 赤 LED (PG10) は検出の通知に使うので触らない (Application/aed/notify.c)。
+ * 以前あった task_2 (赤 LED の点滅と "task 2" の表示) はそのために削除した
+ */
 LOCAL void task_1(INT stacd, void *exinf)
 {
 	while(1) {
-		if(!trace_muted()) tm_printf((UB*)"task 1\n");
-
-		/* Inverts the LED on the board. */
 		out_w(GPIO_ODR(O), (in_w(GPIO_ODR(O)))^(1<<1));
-
 		tk_dly_tsk(500);
-	}
-}
-
-LOCAL void task_2(INT stacd, void *exinf)
-{
-	while(1) {
-		if(!trace_muted()) tm_printf((UB*)"task 2\n");
-
-		/* Inverts the LED on the board. */
-		out_w(GPIO_ODR(G), (in_w(GPIO_ODR(G)))^(1<<10));
-
-		tk_dly_tsk(700);
 	}
 }
 
@@ -232,6 +215,10 @@ EXPORT INT usermain(void)
 	er = tap_ring_init();
 	tm_printf((UB*)"tap_ring_init: ret=%d\n", er);
 
+	/* 通知 (JSON と赤 LED)。推論タスクが窓を処理する前に */
+	er = notify_init();
+	tm_printf((UB*)"notify_init: ret=%d\n", er);
+
 	/* 推論タスク: 推論ランタイムの初期化と自己テストの後、タップリングの窓を待つ。
 	 * ランタイムはスタックを多く使うので、この初期タスク (スタック 1KB) では呼ばない。
 	 * 自己テストが終わるまでここで待つ (推論時間を音声の負荷なしで測るため、音声より先に)。
@@ -242,12 +229,9 @@ EXPORT INT usermain(void)
 	/* 受け入れテスト (fault.h の FAULT_TEST)。1〜4なら戻ってこない */
 	fault_test_run();
 
-	/* Create & Start Tasks */
+	/* 生存表示 (緑 LED の点滅) */
 	tskid_1 = tk_cre_tsk(&ctsk_1);
 	tk_sta_tsk(tskid_1, 0);
-
-	tskid_2 = tk_cre_tsk(&ctsk_2);
-	tk_sta_tsk(tskid_2, 0);
 
 	/* 計測タスク(レポータ/ダンプ)と1秒周期ハンドラを用意する。
 	 * audio 側が trace_rate_start() を呼ぶので、その前に作っておく */

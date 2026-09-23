@@ -5,16 +5,19 @@
 
 # Add inputs and outputs from these tool invocations to the build variables 
 C_SRCS += \
+../Application/trace/log.c \
 ../Application/trace/trace_dwt.c \
 ../Application/trace/trace_ring.c \
 ../Application/trace/trace_task.c 
 
 OBJS += \
+./Application/trace/log.o \
 ./Application/trace/trace_dwt.o \
 ./Application/trace/trace_ring.o \
 ./Application/trace/trace_task.o 
 
 C_DEPS += \
+./Application/trace/log.d \
 ./Application/trace/trace_dwt.d \
 ./Application/trace/trace_ring.d \
 ./Application/trace/trace_task.d 
@@ -27,7 +30,7 @@ Application/trace/%.o Application/trace/%.su Application/trace/%.cyclo: ../Appli
 clean: clean-Application-2f-trace
 
 clean-Application-2f-trace:
-	-$(RM) ./Application/trace/trace_dwt.cyclo ./Application/trace/trace_dwt.d ./Application/trace/trace_dwt.o ./Application/trace/trace_dwt.su ./Application/trace/trace_ring.cyclo ./Application/trace/trace_ring.d ./Application/trace/trace_ring.o ./Application/trace/trace_ring.su ./Application/trace/trace_task.cyclo ./Application/trace/trace_task.d ./Application/trace/trace_task.o ./Application/trace/trace_task.su
+	-$(RM) ./Application/trace/log.cyclo ./Application/trace/log.d ./Application/trace/log.o ./Application/trace/log.su ./Application/trace/trace_dwt.cyclo ./Application/trace/trace_dwt.d ./Application/trace/trace_dwt.o ./Application/trace/trace_dwt.su ./Application/trace/trace_ring.cyclo ./Application/trace/trace_ring.d ./Application/trace/trace_ring.o ./Application/trace/trace_ring.su ./Application/trace/trace_task.cyclo ./Application/trace/trace_task.d ./Application/trace/trace_task.o ./Application/trace/trace_task.su
 
 .PHONY: clean-Application-2f-trace
 

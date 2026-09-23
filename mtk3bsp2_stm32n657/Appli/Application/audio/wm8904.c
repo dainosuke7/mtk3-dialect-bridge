@@ -2,6 +2,7 @@
 #include <tm/tmonitor.h>
 #include "main.h"	// hi2c2 (I2C2, WM8904制御用。main.cのMX_I2C2_Init参照)
 #include "wm8904.h"
+#include "../trace/log.h"	// log_printf() (task_audio から呼ばれるので UART は直接叩かない)
 
 #define WM8904_I2C_TIMEOUT	(100)	// ms
 
@@ -41,9 +42,9 @@ EXPORT ER wm8904_read_device_id(UH *devid)
 LOCAL ER wm8904_step(const UB *name, ER err)
 {
 	if(err == E_OK) {
-		tm_printf((UB*)"  [ OK ] %s\n", name);
+		log_printf("  [ OK ] %s\n", name);
 	} else {
-		tm_printf((UB*)"  [FAIL] %s (err=%d)\n", name, err);
+		log_printf("  [FAIL] %s (err=%d)\n", name, err);
 	}
 	return err;
 }
@@ -67,7 +68,7 @@ EXPORT ER wm8904_init_headphone_16k(UB volume_percent)
 
 	vol = (volume_percent >= 100U) ? 63U : (UB)((volume_percent / 2U) + 13U);
 
-	tm_printf((UB*)"WM8904 init (headphone, 16kHz) start\n");
+	log_printf("WM8904 init (headphone, 16kHz) start\n");
 
 	STEP("SW Reset",                     wm8904_write_reg(WM8904_REG_SW_RESET_ID, 0x0000U));
 	STEP("Clock: CLK_SYS_ENA",           wm8904_write_reg(WM8904_REG_CLOCK_RATES2, 0x0004U));
@@ -119,7 +120,7 @@ EXPORT ER wm8904_init_headphone_16k(UB volume_percent)
 	STEP("Analog HP (remove short)",     wm8904_write_reg(WM8904_REG_ANALOG_HP0, 0x00FFU));
 	STEP("Class W (dynamic power)",      wm8904_write_reg(WM8904_REG_CLASS_W0, 0x0001U));
 
-	tm_printf((UB*)"WM8904 init (headphone, 16kHz) done\n");
+	log_printf("WM8904 init (headphone, 16kHz) done\n");
 	return E_OK;
 }
 

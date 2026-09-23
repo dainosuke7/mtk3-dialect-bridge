@@ -3,13 +3,15 @@
 #include <setjmp.h>
 #include <stdio.h>		// setvbuf
 #include <assert.h>		// __assert_func の宣言 (newlib)
-#include "main.h"		// CMSIS (NVIC)
+#include <string.h>		// memcpy
+#include "main.h"		// CMSIS (NVIC, SCB_CleanInvalidateDCache_by_Addr)
 #include "stai_network.h"	// st/model/ (ST 生成コード)
 #include "ll_aton.h"		// startWatchdog / checkWatchdog の宣言、ATON_STD_IRQn
 #include "ll_aton_version.h"
 #include "npu_rt.h"
 #include "npu_hw.h"
 #include "../trace/trace.h"	// NOW(), trace_cyc_per_us(), TRACE()
+#include "../trace/log.h"	// log_printf() (レポータができる前は直接 UART に出る)
 #include "../fault/fault_out.h"	// fault_putc / fault_puts / fault_halt
 
 /*
@@ -82,7 +84,7 @@ LOCAL UW		wd_elapsed;
 /* 1ステップの結果を UART に出す (npu_hw.c と同じ書式) */
 LOCAL BOOL rt_step(const char *name, BOOL ok)
 {
-	tm_printf(ok ? (UB*)"  [ OK ] %s\n" : (UB*)"  [FAIL] %s\n", name);
+	log_printf(ok ? "  [ OK ] %s\n" : "  [FAIL] %s\n", name);
 	return ok;
 }
 
@@ -149,27 +151,30 @@ EXPORT void __assert_func(const char *file, int line, const char *func, const ch
 
 /* ---------------------------------------------------------------- */
 
-/* shape を "1x64x96x1" の形で出す */
+/*
+ * shape を "1x64x96x1" の形で出す。1行を数回に分けて出すが、これを呼ぶのは
+ * npu_rt_init だけで、そのときはまだレポータが無く直接 UART に出るので行は乱れない
+ */
 LOCAL void show_shape(const stai_shape *s)
 {
 	stai_size	i;
 
 	for(i = 0; i < s->size; i++) {
-		tm_printf((i == 0) ? (UB*)"%d" : (UB*)"x%d", (INT)s->data[i]);
+		log_printf((i == 0) ? "%d" : "x%d", (INT)s->data[i]);
 	}
 }
 
 LOCAL void show_tensor(const char *name, const stai_tensor *t, uintptr_t addr)
 {
-	tm_printf((UB*)"  %s \"%s\" @ 0x%08x: %u B, format=0x%08x, shape=",
+	log_printf("  %s \"%s\" @ 0x%08x: %u B, format=0x%08x, shape=",
 			name, (t->name != NULL) ? t->name : "", (UW)addr, (UW)t->size_bytes, (UW)t->format);
 	show_shape(&t->shape);
 	if(t->scale.size > 0 && t->zeropoint.size > 0) {
 		/* tm_printf は浮動小数点を出せないので 1e-9 単位の整数で出す */
-		tm_printf((UB*)", scale=%u e-9, zero_point=%d",
+		log_printf(", scale=%u e-9, zero_point=%d",
 				(UW)(t->scale.data[0] * 1e9f + 0.5f), (INT)t->zeropoint.data[0]);
 	}
-	tm_printf((UB*)"\n");
+	log_printf("\n");
 }
 
 EXPORT ER npu_rt_init(void)
@@ -181,16 +186,16 @@ EXPORT ER npu_rt_init(void)
 	stai_size		n_in = 0, n_out = 0;
 	BOOL			ok;
 
-	tm_printf((UB*)"npu rt init (ll_aton %s, model %s)\n",
+	log_printf("npu rt init (ll_aton %s, model %s)\n",
 			LL_ATON_VERSION_NAME, STAI_NETWORK_ORIGIN_MODEL_NAME);
 
 	if(!npu_hw_ready()) {
 		/* NPU にクロックが無いと LL_ATON_Init がバージョンの読み直しを続けて戻らない */
-		tm_printf((UB*)"  [SKIP] runtime init (npu_hw_init was not OK)\n");
+		log_printf("  [SKIP] runtime init (npu_hw_init was not OK)\n");
 		return E_OBJ;
 	}
 	if(!trace_cyccnt_valid()) {
-		tm_printf((UB*)"  [WARN] DWT CYCCNT not running: inference timeout cannot be detected\n");
+		log_printf("  [WARN] DWT CYCCNT not running: inference timeout cannot be detected\n");
 	}
 
 	/* 最初の出力より前に。以後 ll_aton の printf / puts は malloc を起こさない */
@@ -205,28 +210,28 @@ EXPORT ER npu_rt_init(void)
 	__DSB();
 	__ISB();
 
-	tm_printf((UB*)"  stai_runtime_init: rc=0x%x\n", (UW)rc);
+	log_printf("  stai_runtime_init: rc=0x%x\n", (UW)rc);
 	if(!rt_step("stai_runtime_init", rc == STAI_SUCCESS)) return E_IO;
 
-	tm_printf((UB*)"  NVIC IRQ %d (NPU0): enabled=%d pending=%d\n", (INT)ATON_STD_IRQn,
+	log_printf("  NVIC IRQ %d (NPU0): enabled=%d pending=%d\n", (INT)ATON_STD_IRQn,
 			(INT)NVIC_GetEnableIRQ(ATON_STD_IRQn), (INT)NVIC_GetPendingIRQ(ATON_STD_IRQn));
 	(void)rt_step("NPU interrupt disabled (polling only)", NVIC_GetEnableIRQ(ATON_STD_IRQn) == 0);
 
 	rc = stai_network_init(net);
-	tm_printf((UB*)"  stai_network_init: rc=0x%x (context %u B)\n", (UW)rc, (UW)STAI_NETWORK_CONTEXT_SIZE);
+	log_printf("  stai_network_init: rc=0x%x (context %u B)\n", (UW)rc, (UW)STAI_NETWORK_CONTEXT_SIZE);
 	if(!rt_step("stai_network_init", rc == STAI_SUCCESS)) return E_IO;
 
 	rc = stai_network_get_info(net, &info);
 	if(!rt_step("stai_network_get_info", rc == STAI_SUCCESS)) {
-		tm_printf((UB*)"  rc=0x%x\n", (UW)rc);
+		log_printf("  rc=0x%x\n", (UW)rc);
 		return E_IO;
 	}
-	tm_printf((UB*)"  c_model=%s (%s), runtime %d.%d.%d, tool %d.%d.%d, macc=%u, nodes=%u\n",
+	log_printf("  c_model=%s (%s), runtime %d.%d.%d, tool %d.%d.%d, macc=%u, nodes=%u\n",
 			info.c_model_name, info.c_model_datetime,
 			info.runtime_version.major, info.runtime_version.minor, info.runtime_version.micro,
 			info.tool_version.major, info.tool_version.minor, info.tool_version.micro,
 			(UW)info.n_macc, (UW)info.n_nodes);
-	tm_printf((UB*)"  n_inputs=%d n_outputs=%d n_activations=%d n_weights=%d\n",
+	log_printf("  n_inputs=%d n_outputs=%d n_activations=%d n_weights=%d\n",
 			info.n_inputs, info.n_outputs, info.n_activations, info.n_weights);
 
 	rc = stai_network_get_inputs(net, in, &n_in);
@@ -234,7 +239,7 @@ EXPORT ER npu_rt_init(void)
 	rc = stai_network_get_outputs(net, out, &n_out);
 	ok = ok && (rc == STAI_SUCCESS) && (n_out == 1) && (out[0] != NULL);
 	if(!rt_step("stai_network_get_inputs/outputs", ok)) {
-		tm_printf((UB*)"  rc=0x%x n_in=%u n_out=%u\n", (UW)rc, (UW)n_in, (UW)n_out);
+		log_printf("  rc=0x%x n_in=%u n_out=%u\n", (UW)rc, (UW)n_in, (UW)n_out);
 		return E_IO;
 	}
 	show_tensor("input ", &info.inputs[0], (uintptr_t)in[0]);
@@ -246,7 +251,7 @@ EXPORT ER npu_rt_init(void)
 	in_buf  = (B *)in[0];
 	out_buf = (const float *)out[0];
 	ready   = TRUE;
-	tm_printf((UB*)"npu rt ready (inference timeout %u us)\n", (UW)NPU_RT_TIMEOUT_US);
+	log_printf("npu rt ready (inference timeout %u us)\n", (UW)NPU_RT_TIMEOUT_US);
 	return E_OK;
 }
 
@@ -266,6 +271,53 @@ EXPORT const float *npu_rt_output(void)
 }
 
 /*
+ * 入力を NPU の入力バッファへ写し、D キャッシュを clean+invalidate する。
+ * CPU が書いた値を RAM に出し (clean)、同じ範囲のラインをキャッシュから捨てる (invalidate)。
+ * 入力の領域は推論中に NPU と SW epoch が中間結果・出力の置き場に使うので、clean だけだと
+ * キャッシュに残ったラインが後で NPU の書いた値を隠す。ST も同じ操作 (preproc_dpu.c:144)。
+ * 先頭は 32B 境界 (npu_rt_init で確認済み)、長さ 6144 は 32 の倍数
+ */
+EXPORT void npu_rt_load_input(const B *src)
+{
+	if(!ready) return;
+
+	memcpy(in_buf, src, NPU_RT_IN_BYTES);
+	SCB_CleanInvalidateDCache_by_Addr((volatile void *)in_buf, NPU_RT_IN_BYTES);
+}
+
+/*
+ * 出力 (softmax 後の float x10) を写す。最後の SW epoch が CPU で書き、network.c が
+ * その後 clean しているので、CPU のキャッシュが正しい値を持っている (invalidate は要らない)
+ */
+EXPORT void npu_rt_read_output(float *out)
+{
+	INT	i;
+
+	if(!ready) return;
+
+	for(i = 0; i < NPU_RT_OUT_CLASSES; i++) out[i] = out_buf[i];
+}
+
+EXPORT ER npu_rt_infer(const B *in, float *out, UW *us)
+{
+	UW	t0;
+	ER	er;
+
+	*us = 0;
+	if(!ready) return E_OBJ;
+
+	npu_rt_load_input(in);
+
+	t0  = NOW();
+	er  = npu_rt_run();
+	*us = trace_cyc_to_us((UW)(NOW() - t0));
+	if(er != E_OK) return er;
+
+	npu_rt_read_output(out);
+	return E_OK;
+}
+
+/*
  * タイムアウトした時点の ll_aton と NPU の状態を出す (推論の途中で止まったまま読む)。
  * - 実行中の epoch block の番号。epoch 番号そのもの (epoch_num) は LL_ATON_EB_DBG_INFO を
  *   定義しないと持たないので、配列の何番目かと関数の番地を出す。番地は .map で
@@ -280,21 +332,21 @@ LOCAL void rt_dump_state(void)
 	UW					i;
 
 	if(eb == NULL || st->first_epoch_block == NULL) {
-		tm_printf((UB*)"  [npu] no current epoch block (inference_started=%d)\n", st->inference_started ? 1 : 0);
+		log_printf("  [npu] no current epoch block (inference_started=%d)\n", st->inference_started ? 1 : 0);
 	} else {
-		tm_printf((UB*)"  [npu] epoch block %d of %u: flags=0x%x wait_mask=0x%x start_fn=0x%08x end_fn=0x%08x\n",
+		log_printf("  [npu] epoch block %d of %u: flags=0x%x wait_mask=0x%x start_fn=0x%08x end_fn=0x%08x\n",
 				(INT)(eb - st->first_epoch_block), (UW)st->nr_of_epoch_blocks,
 				(UW)eb->flags, (UW)eb->wait_mask,
 				(UW)(uintptr_t)eb->start_epoch_block, (UW)(uintptr_t)eb->end_epoch_block);
 		if((eb->flags & EpochBlock_Flags_blob) == 0) {
 			for(i = 0; i < ATON_STRENG_NUM; i++) {
 				if((eb->wait_mask & (1U << i)) == 0) continue;
-				tm_printf((UB*)"  [npu] STRENG%u CTRL=0x%08x (RUNNING=%u)\n", i, (UW)ATON_STRENG_CTRL_GET(i),
+				log_printf("  [npu] STRENG%u CTRL=0x%08x (RUNNING=%u)\n", i, (UW)ATON_STRENG_CTRL_GET(i),
 						(UW)((ATON_STRENG_CTRL_GET(i) >> ATON_STRENG_CTRL_RUNNING_LSB) & 1U));
 			}
 		}
 	}
-	tm_printf((UB*)"  [npu] INTCTRL INTREG=0x%08x\n", (UW)ATON_INTCTRL_INTREG_GET(0));
+	log_printf("  [npu] INTCTRL INTREG=0x%08x\n", (UW)ATON_INTCTRL_INTREG_GET(0));
 }
 
 EXPORT ER npu_rt_run(void)
@@ -311,7 +363,7 @@ EXPORT ER npu_rt_run(void)
 	if(setjmp(wd_jmp) != 0) {
 		/* checkWatchdog からの longjmp。ll_aton は推論の途中で止まっている */
 		broken = TRUE;
-		tm_printf((UB*)"[npu] inference TIMEOUT: %u us > %u us (count=%u)."
+		log_printf("[npu] inference TIMEOUT: %u us > %u us (count=%u)."
 				" runtime left mid-inference, further runs refused until recovery is implemented\n",
 				trace_cyc_to_us(wd_elapsed), (UW)NPU_RT_TIMEOUT_US, timeouts);
 		rt_dump_state();
@@ -325,7 +377,7 @@ EXPORT ER npu_rt_run(void)
 	TRACE(EV_INF_END, (UB)runs);
 
 	if(rc != STAI_SUCCESS) {
-		tm_printf((UB*)"[npu] stai_network_run: rc=0x%x\n", (UW)rc);
+		log_printf("[npu] stai_network_run: rc=0x%x\n", (UW)rc);
 		return E_IO;
 	}
 	return E_OK;
@@ -400,9 +452,9 @@ EXPORT void npu_rt_cb_log_show(void)
 {
 	UW	i;
 
-	tm_printf((UB*)"  [npu] epoch callback calls recorded: %u\n", cb_log_n);
+	log_printf("  [npu] epoch callback calls recorded: %u\n", cb_log_n);
 	for(i = 0; i < cb_log_n && i < CB_LOG_MAX; i++) {
-		tm_printf((UB*)"    [%3u] block %3d / %u  %-10s flags=0x%02x\n", i,
+		log_printf("    [%3u] block %3d / %u  %-10s flags=0x%02x\n", i,
 				(cb_log[i].idx == 0xFF) ? -1 : (INT)cb_log[i].idx, (UW)cb_log[i].n,
 				cb_type_name(cb_log[i].type), (UW)cb_log[i].flags);
 	}

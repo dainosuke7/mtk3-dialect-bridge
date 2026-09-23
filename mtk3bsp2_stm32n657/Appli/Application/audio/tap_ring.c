@@ -110,7 +110,7 @@ LOCAL void resync_to(UW h)
 EXPORT ER tap_ring_get_window(H *dst, TMO tmout, TAP_WIN_INFO *info)
 {
 	UW	want = rd_pos + TAP_WIN_LEN;	/* rd_want に出してある値 */
-	UW	h, h2, i, first, rf, rc, lag;
+	UW	h, h2, i, first, rf, rc, lag, t_ready;
 	UINT	imask;
 	BOOL	exact;
 	ER	er;
@@ -150,18 +150,21 @@ EXPORT ER tap_ring_get_window(H *dst, TMO tmout, TAP_WIN_INFO *info)
 	rc = ready_cyc;
 	EI(imask);
 	if(rf == want && !rd_resync) {
-		lag   = trace_cyc_to_us((UW)(NOW() - rc));
-		exact = TRUE;
+		t_ready = rc;
+		lag     = trace_cyc_to_us((UW)(NOW() - rc));
+		exact   = TRUE;
 	} else {
 		/* 待ち位置を出す前にそろっていた: 窓の後ろに溜まっていた分の長さが遅れの下限 */
-		lag   = (UW)(((uint64_t)(UW)(h2 - want) * 1000000ULL) / SR_HZ);
-		exact = FALSE;
+		lag     = (UW)(((uint64_t)(UW)(h2 - want) * 1000000ULL) / SR_HZ);
+		t_ready = (UW)(NOW() - (UW)((uint64_t)lag * (uint64_t)trace_cyc_per_us()));
+		exact   = FALSE;
 		st_late++;
 	}
 	if(lag > st_lag_max_us) st_lag_max_us = lag;
 
 	info->seq       = st_windows;
 	info->pos       = rd_pos;
+	info->t_ready   = t_ready;
 	info->lag_us    = lag;
 	info->lag_exact = exact;
 	info->resync    = rd_resync;

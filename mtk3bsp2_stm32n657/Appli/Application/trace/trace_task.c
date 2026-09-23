@@ -3,6 +3,7 @@
 #include "main.h"
 #include "trace.h"
 #include "trace_ring.h"
+#include "log.h"
 
 /* ---------------------------------------------------------------- */
 /* 実効レートの母数                                                   */
@@ -32,9 +33,15 @@ typedef struct {
 	UW	over;
 } rate_rec_t;
 
+/* レポータに渡す形。先頭 2 語は LOG_MSG と同じ (log.h) */
+typedef struct {
+	UW		type;
+	UW		t_send;
+	rate_rec_t	rec;
+} rate_msg_t;
+
 #define RATE_PERIOD_MS	(1000)
 
-LOCAL ID	rate_mbfid   = 0;
 LOCAL ID	rate_cycid   = 0;
 LOCAL ID	tskid_report = 0;
 LOCAL ID	tskid_dump   = 0;
@@ -49,25 +56,27 @@ LOCAL UW	prev_t;
 /* 周期ハンドラ内は引き算だけ。Hz換算と表示はタスクに回す */
 LOCAL void rate_cychdr(void *exinf)
 {
-	rate_rec_t	rec;
+	rate_msg_t	m;
 	UW		now_in, now_out, now_t;
 
 	now_in  = rate_in_samples;
 	now_out = rate_out_samples;
 	now_t   = NOW();
 
-	rec.d_in  = (UW)(now_in  - prev_in);
-	rec.d_out = (UW)(now_out - prev_out);
-	rec.d_cyc = (UW)(now_t   - prev_t);
-	rec.ring  = (rate_ring_level != NULL) ? (UW)rate_ring_level() : 0;
-	rec.under = rate_underrun;
-	rec.over  = rate_overrun;
+	m.rec.d_in  = (UW)(now_in  - prev_in);
+	m.rec.d_out = (UW)(now_out - prev_out);
+	m.rec.d_cyc = (UW)(now_t   - prev_t);
+	m.rec.ring  = (rate_ring_level != NULL) ? (UW)rate_ring_level() : 0;
+	m.rec.under = rate_underrun;
+	m.rec.over  = rate_overrun;
 
 	prev_in  = now_in;
 	prev_out = now_out;
 	prev_t   = now_t;
 
-	(void)tk_snd_mbf(rate_mbfid, &rec, sizeof(rec), TMO_POL);
+	/* 書式化はレポータに任せる。tk_snd_mbf は TMO_POL なのでタスク独立部から呼べる */
+	m.type = LOG_TYPE_RATE;
+	(void)log_send(&m, sizeof(m.rec));
 }
 
 /* ---------------------------------------------------------------- */
@@ -88,32 +97,73 @@ LOCAL void uart_unlock(void)
 /* レポータタスク (優先度20)                                          */
 /* ---------------------------------------------------------------- */
 
+/* 実効レートの1行 (換算と表示はここで行う) */
+LOCAL void report_rate(const rate_rec_t *rec)
+{
+	UW	dt_us, in_hz, out_hz, drop;
+
+	dt_us = trace_cyc_to_us(rec->d_cyc);
+	if(dt_us == 0) {
+		in_hz  = 0;
+		out_hz = 0;
+	} else {
+		in_hz  = (UW)(((uint64_t)rec->d_in  * 1000000ULL) / dt_us);
+		out_hz = (UW)(((uint64_t)rec->d_out * 1000000ULL) / dt_us);
+	}
+	drop = log_dropped();
+
+	uart_lock();
+	tm_printf((UB*)"in=%uHz out=%uHz ring=%u under=%u over=%u (dt=%uus)",
+			in_hz, out_hz, rec->ring, rec->under, rec->over, dt_us);
+	if(drop != 0) {
+		/* 行があふれて捨てられている。LOG_DEPTH か行数を見直す目印 */
+		tm_printf((UB*)" logdrop=%u", drop);
+	}
+	tm_printf((UB*)" loglag=%uus\n", log_lag_max_us());
+	uart_unlock();
+}
+
+/*
+ * UART に書くのはこのタスクだけ (トレースの CSV ダンプと、レポータができる前の
+ * 起動時のログを除く)。送られた順に出すので、行が混ざらない
+ */
 LOCAL void task_report(INT stacd, void *exinf)
 {
-	rate_rec_t	rec;
-	INT		sz;
-	UW		dt_us, in_hz, out_hz;
+	LOG_MSG	msg;
+	INT	sz;
 
 	while(1) {
-		sz = tk_rcv_mbf(rate_mbfid, &rec, TMO_FEVR);
-		if(sz < (INT)sizeof(rec)) continue;
+		/*
+		 * まず溜まっている分を取る。空なら「出し切った」ので、予約されている
+		 * loglag の測り直しをここで済ませてから待ちに入る (log.h)
+		 */
+		sz = log_recv(&msg, TMO_POL);
+		if(sz == E_TMOUT) {
+			log_lag_note_idle();
+			sz = log_recv(&msg, TMO_FEVR);
+		}
+		if(sz < 0) continue;
 
 		/* ダンプ中は黙る。CSVに混ざるのを防ぐ */
 		if(trace_muted()) continue;
 
-		dt_us = trace_cyc_to_us(rec.d_cyc);
-		if(dt_us == 0) {
-			in_hz  = 0;
-			out_hz = 0;
-		} else {
-			in_hz  = (UW)(((uint64_t)rec.d_in  * 1000000ULL) / dt_us);
-			out_hz = (UW)(((uint64_t)rec.d_out * 1000000ULL) / dt_us);
+		switch(msg.type) {
+		case LOG_TYPE_TEXT:
+			uart_lock();
+			tm_putstring(msg.body);
+			uart_unlock();
+			break;
+
+		case LOG_TYPE_RATE:
+			if(sz >= (INT)sizeof(rate_rec_t)) report_rate((const rate_rec_t *)msg.body);
+			break;
+
+		default:
+			break;
 		}
 
-		uart_lock();
-		tm_printf((UB*)"in=%uHz out=%uHz ring=%u under=%u over=%u (dt=%uus)\n",
-				in_hz, out_hz, rec.ring, rec.under, rec.over, dt_us);
-		uart_unlock();
+		/* 送られてから出し終わるまで (通知の遅れに載る UART の待ちぶん) */
+		log_note_done(msg.t_send);
 	}
 }
 
@@ -234,6 +284,13 @@ LOCAL void dump_all(void)
 	tm_printf((UB*)"#trace end dropped=%u muted=%u\n",
 			trace_dropped(), trace_muted_count());
 	uart_unlock();
+
+	/*
+	 * ダンプのあいだレポータは行を捨てるだけで、ダンプの前後に溜まった行は
+	 * この直後にまとめて出る。通知の遅れの目安として見る値なので測り直すが、
+	 * 0 に戻すのはレポータが溜まった行を出し切ってから (log.h)
+	 */
+	log_lag_reset_when_idle();
 }
 
 LOCAL void task_dump(INT stacd, void *exinf)
@@ -269,15 +326,9 @@ LOCAL T_CMTX cmtx_uart = {
 	.ceilpri = 0,
 };
 
-LOCAL T_CMBF cmbf_rate = {
-	.mbfatr	= TA_TFIFO,
-	.bufsz	= sizeof(rate_rec_t) * 4,
-	.maxmsz	= sizeof(rate_rec_t),
-};
-
 LOCAL T_CTSK ctsk_report = {
 	.itskpri = 20,
-	.stksz	 = 1024,
+	.stksz	 = 1536,		/* LOG_MSG (約170B) をスタックに置く */
 	.task	 = task_report,
 	.tskatr	 = TA_HLNG | TA_RNG3,
 };
@@ -299,14 +350,15 @@ LOCAL T_CCYC ccyc_rate = {
 EXPORT ER trace_task_start(void)
 {
 	ID	id;
+	ER	er;
 
 	id = tk_cre_mtx(&cmtx_uart);
 	if(id < E_OK) return (ER)id;
 	uart_mtxid = id;
 
-	id = tk_cre_mbf(&cmbf_rate);
-	if(id < E_OK) return (ER)id;
-	rate_mbfid = id;
+	/* 出力を集めるメッセージバッファ。レポータを起こす前に作る */
+	er = log_init();
+	if(er < E_OK) return er;
 
 	id = tk_cre_tsk(&ctsk_report);
 	if(id < E_OK) return (ER)id;

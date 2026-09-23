@@ -51,6 +51,23 @@ EXPORT B *npu_rt_input(void);
 EXPORT const float *npu_rt_output(void);
 
 /*
+ * 入力 (int8 NPU_RT_IN_BYTES バイト) を入力バッファへ写し、D キャッシュを
+ * clean+invalidate する (推論の直前に必ず行う操作。理由は npu_rt.c)
+ */
+EXPORT void npu_rt_load_input(const B *src);
+
+/* 出力 (float x NPU_RT_OUT_CLASSES) を写す */
+EXPORT void npu_rt_read_output(float *out);
+
+/*
+ * 入力を載せて1回推論し、出力を写す (load_input → run → read_output)。
+ * *us に npu_rt_run の所要時間 (DWT) を返す。
+ * 戻り値: E_OK / E_OBJ 未初期化 / その他 npu_rt_run() の戻り値。
+ * 呼ぶのは推論タスクだけ (npu_rt_run と同じ理由)
+ */
+EXPORT ER npu_rt_infer(const B *in, float *out, UW *us);
+
+/*
  * 推論を1回実行し、終わるまで待つ (ポーリング。呼び出したタスクがその間 CPU を使い続ける)。
  * 戻り値: E_OK 完了 / E_OBJ 未初期化 / E_IO ランタイムがエラーを返した・前回タイムアウトして
  *         後始末が済んでいない / E_TMOUT NPU_RT_TIMEOUT_US を超えた

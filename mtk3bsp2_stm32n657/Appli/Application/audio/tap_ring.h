@@ -26,8 +26,9 @@
 typedef struct {
 	UW	seq;		/* 取り出した窓の通し番号 (0 から) */
 	UW	pos;		/* 窓の先頭の、書き込み開始からの累計サンプル番号 */
+	UW	t_ready;	/* 窓の最後のサンプルを書いた時刻 (DWT CYCCNT)。通知の遅れの起点 */
 	UW	lag_us;		/* 窓がそろってから取り出すまで */
-	BOOL	lag_exact;	/* FALSE: 読み手が待ち位置を出す前に窓がそろっていたので、lag_us は下限 */
+	BOOL	lag_exact;	/* FALSE: 読み手が待ち位置を出す前に窓がそろっていたので、lag_us と t_ready は下限 */
 	BOOL	resync;		/* 直前に上書きで読み位置を飛ばした (前の窓とつながっていない) */
 } TAP_WIN_INFO;
 

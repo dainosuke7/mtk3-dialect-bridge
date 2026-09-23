@@ -28,6 +28,7 @@ COM ポートは1プロセスしか開けない。他のターミナルを閉じ
 CubeProgrammer は CubeIDE 同梱: C:\ST\STM32CubeIDE_*\STM32CubeIDE\plugins\*cubeprogrammer*\tools\bin 重み hex はリポジトリに入れない（ST ライセンス・容量）。取得元は README に記載
 
 NPU 比較用の参照値（PC）: uv run scripts/aed_ref.py <GettingStarted-Audio>/Projects/X-CUBE-AI/models/yamnet_1024_64x96_tl_qdq_int8.onnx → Application/npu/aed_test_input.h を上書き生成（seed 固定なので同じ内容になる。softmax 後の値と、softmax 直前の int8 ロジット・scale・zero_point）
+対照試験（PC のスピーカーで鳴らす）: uv run scripts/aed_play_test.py <ESC-50>（--dry-run で音を出さず進行だけ、--silence/--interval で短縮）。0〜60秒は無音＝誤報の基準、60秒以降は5秒のクリップを15秒間隔で10本（dog / crying_baby / crackling_fire / sneezing / clock_tick を2巡）。記録は logs/play_<日時>.txt に 1行 = [+62.0s] dog 5-203128-A-0.wav。ボードの UART ログの JSON と経過秒で突き合わせる（別時計なので相対時刻。窓の番号 x 0.96 秒が目安）。再生は winsound（Windows のみ）で音量は OS 側任せ
 実録音の判定用（PC）: uv run scripts/aed_clips.py <GettingStarted-Audio> <ESC-50> → Application/npu/aed_test_clips.h（30 本の int8 入力）と Application/aed/aed_ref_clips.h（そのうち2本の生 PCM も入れた前処理の突き合わせ用）。どちらもコミットしない。ESC-50 は git clone github.com/karolpiczak/ESC-50（使うのは meta/ と audio/ の 30 本。ファイル名はスクリプトに固定）
 
 ハード
@@ -53,11 +54,14 @@ MIC_DET で外部マイクボード装着時はオンボードマイクがバイ
 タスク構成と優先度（小さいほど高い）
 優先度	タスク	役割
 5	task_pcm	DMA通知（イベントフラグ4ビット）を受けて入力変換・リング操作・出力充填
-10	task_audio, task_1, task_2	パススルー制御・統計表示 / LED 点滅
-15	task_infer	NPU ランタイムの初期化・自己テスト・タップリングの窓の取り出しと推論（infer_task.c。ll_aton を呼ぶのはこのタスクだけ）
-20	reporter	1秒レート表示
+10	task_audio, task_1	パススルー制御・統計表示 / 生存表示の LED 点滅（緑 PO1）
+15	task_infer	NPU ランタイムの初期化・自己テスト・窓ごとの 前処理→推論→判定→通知（infer_task.c。ll_aton を呼ぶのはこのタスクだけ）
+20	reporter	UART 出力の唯一の書き手（メッセージバッファから受けて出す）＋1秒レート表示
 32	dump	トレース状態機械・CSV ダンプ
+task_2（赤 LED の点滅と "task 2" 表示）はタスク9 で削除した。赤 LED（PG10）は検出の通知に使う（Application/aed/notify.c）
 DMA コールバックは TRACE → カウンタ更新 → tk_set_flg だけ行い即 return
+UART に書くのは reporter だけ（タスク9）。他のタスクは log_printf（Application/trace/log.c）で1行を文字列にしてメッセージバッファへ送る。tk_snd_mbf は必ず TMO_POL で、いっぱいなら捨てて数える（音声・推論を UART の速さで待たせない。ミューテックスは使わない）。log_init 前（起動時の初期化・npu_selftest・extflash）はその場で直接出る。CSV ダンプ中（trace_muted）は reporter が捨てる
+log_printf の書式は tm_printf の部分集合を自前で実装したもの（newlib の snprintf は malloc を起こすので使えない）。1行 160 文字で切り捨てるので、長い行は分けて出す。書式と引数の数が合っているかは、log.h の宣言に一時的に __attribute__((format(printf,1,2))) を付けてビルドし -Wformat-extra-args だけを見る（UW が unsigned long なので %u は常に警告になる。付けたままにしない）
 出力バッファが不足したら無音を詰めて必ず全体を埋める
 PCM リング（pcm_fifo）は SPSC。消費者を増やせない。推論用は音声タスクが別リング（tap）にもコピーする
 タップリング（audio/tap_ring.c）: int16 x 32768（約2秒）。書き手は task_pcm の mic_process_half（pcm_fifo へ入れたのと同じ値、待たない）、読み手は task_infer だけ。head は累計サンプル数で単調増加。窓は 15600 サンプル、次の窓は 15360 後（ST と同じ、重なり 240）。読み手が待つ位置を書き手が越えたときだけセマフォを1回 signal する。上書きは取り出し前（E_OBJ）とコピー中（E_IO）で別に数え、読み位置を最新の窓へ飛ばす。書き手・読み手の順序は __DMB() で保つ（根拠は tap_ring.c の先頭）
@@ -72,7 +76,7 @@ PCM リング（pcm_fifo）は SPSC。消費者を増やせない。推論用は
 フォルト可視化（Application/fault/）: 起動時にベクタテーブルを RAM にコピーし、未実装 IRQ 180本とフォルト例外5本を差し替え。 CFSR/BFAR/スタック上の PC を UART 直叩きで出してから停止。デバッガ接続時は __BKPT で止まるので F8 で続行
 FAULT_TEST（fault.h）: 0=無効 / 1=BusFault / 2=ゼロ除算 / 3=未実装IRQ / 4=STKOF。コミット時は必ず 0
 トレース（Application/trace/）: TRACE(id,arg) で (CYCCNT, id, arg) を記録。trace_start(ms) で区間記録し、終了後に CSV ダンプ。 ダンプ中は trace_muted() で他の出力を抑制
-テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）と NPU_PT_TEST（infer_task.c、パススルー中にタップリングの窓ごと＝約 960ms 間隔で乱数入力の推論10回。推論を載せたときの予行）は Phase 1 の実機確認が済むまで 1。 PREPROC_TEST（infer_task.c、前処理を PC と突き合わせる。タスク8）は 1、AED_USE_TEST_CLIPS（npu_selftest.c、30 本で NPU を判定）は ROM の都合で 0
+テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）と NPU_PT_TEST（infer_task.c、パススルー中に乱数入力の推論10回。タスク7 の予行）はタスク9 で本番の推論が入ったので 0。 PREPROC_TEST（infer_task.c、前処理を PC と突き合わせる。タスク8）は 1、AED_USE_TEST_CLIPS（npu_selftest.c、30 本で NPU を判定）は ROM の都合で 0
 既知の罠
 tm_printf はカーネル起動前（knl_start_mtkernel より前）に使えない。 起動前の初期化関数は Error_Handler() を呼ばず、結果を変数に記録してカーネル起動まで到達させる
 FSBL がペリフェラルを触った状態でアプリが起動する。 HAL_xxx_Init が HAL_ERROR を返したら __HAL_RCC_xxx_FORCE_RESET()/RELEASE_RESET() で戻してから初期化（MDF1 で発生。XSPI2 は最初からリセットしてから初期化している）
@@ -101,7 +105,7 @@ AED の末尾: epoch 29（NPU、Gemm）→ int8 x10 を 0x34350000 → epoch 30�
 PC の参照（aed_ref.py）の int8 ロジットは、ORT の最適化あり（int8 演算）となし（float 演算）で最大 15 LSB 違う（上位クラスでは 2 LSB）。NPU との比較の許容幅はこれを踏まえて決める
 NPU の正しさの判定は ESC-10 の実録音 30 本の1位を PC と比べる（npu_selftest.c の clips_check、入力は scripts/aed_clips.py が生成する aed_test_clips.h）。乱数入力は分布外で上位2クラスが拮抗し、丸めの積み重ねで確率が動くので参考値だけ
 aed_test_clips.h・aed_ref_clips.h は ESC-50 由来なのでコミットしない（.gitignore）。無ければボード側は __has_include でその判定を飛ばす（NOT JUDGED / SKIP）。ヘッダ無しでビルドした後は .d にヘッダが載らず make が作り直さないので、aed_clips.py が npu_selftest.c と infer_task.c の更新時刻を進める
-ROM が足りないので、30 本の判定（aed_test_clips.h、入力だけで 184,320B）と前処理の突き合わせ（aed_ref_clips.h、2 本の生 PCM + テンソルで 74,688B）は同時に載せない。切り替えは npu_selftest.c の AED_USE_TEST_CLIPS と infer_task.c の PREPROC_TEST。前処理側だけを 1 にした状態でコード領域 345,876B / 511KB（66.1%）、30 本側だけなら 436,800B（83.5%）
+ROM が足りないので、30 本の判定（aed_test_clips.h、入力だけで 184,320B）と前処理の突き合わせ（aed_ref_clips.h、2 本の生 PCM + テンソルで 74,688B）は同時に載せない。切り替えは npu_selftest.c の AED_USE_TEST_CLIPS と infer_task.c の PREPROC_TEST。前処理側だけを 1 にした状態でコード領域 348,988B / 511KB（66.7%。タスク9 まで込み）、30 本側だけなら +90KB 程度
 epoch フック（npu_rt_set_epoch_hook）は今は呼ばれない。stai_network_run（ll_aton_stai_internal.c:417-425）が推論のたびに epoch コールバックを NULL か stai 自身のものに設定し直すため。直すなら stai_network_set_callback() で登録する（未実施）
 前処理 log-mel の仕様（ボードの実装は Application/aed/preproc.c＝タスク8。PC 実装は scripts/aed_clips.py の logmel_q8。ST の値は GenHeader/user_config_aed.yaml → Dpu/ai_model_config.h.aed・user_mel_tables.c.aed）
   入力: int16 16kHz の先頭 15600 サンプル。列 i（0〜95）はサンプル [160i, 160i+400)
@@ -114,6 +118,18 @@ epoch フック（npu_rt_set_epoch_hook）は今は呼ばれない。stai_networ
   ボードの実装（preproc.c）は CMSIS-DSP を使わず、窓・ツイドル・メルフィルタの表を preproc_init() が double で作って float32 で持つ（ROM を使わない。表の係数は 461 個で ST・PC と同じ）。FFT は 512 点の複素 radix-2（実部に信号、虚部 0）。量子化は ST と同じ順序（roundf(v × inv_scale + zp) → SSAT）
   移植の確認は infer_task.c の preproc_test（PREPROC_TEST）。aed_ref_clips.h の生 PCM 2 本をボードで log-mel にして PC のテンソルと 6144 要素すべて比べ、そのテンソルで推論して1位を PC と並べる。前処理と NPU の切り分けのため PC のテンソルでの推論も行う。差が 1 を超える要素があれば移植が違う（float32 と float64 の差では出ない）
   preproc.c と同じ計算を float32 で書き直した PC 版（使い捨て。未コミット）を PC のテンソルと比べたところ、2 本とも 6144 要素すべて一致した＝表の作り方・FFT・メル・量子化・並びは合っている。実機は未確認（GCC が積和を VFMA にまとめる・newlib の logf が numpy と 1ulp 違うと、丸めの境界の要素が 1 LSB 動き得る）
+窓ごとの本番動作（タスク9。infer_task.c の task_infer）
+  tap_ring_get_window → preproc_run（log-mel）→ npu_rt_infer → notify_decide → notify_window（JSON と LED）。推論の入力は静的な in_tensor（6144B）で、前処理セルフテストと共用する
+  判定は ST と同じ（audio_bm.c:488）: 最大確率 > 0.5（CTRL_X_CUBE_AI_OOD_THR）なら そのクラス、そうでなければ unknown
+  通知は1行の JSON: {"win":123,"cls":"dog","p":0.87,"lat_ms":53,"under":0,"over":0,"late":0}。検出は毎窓出し、unknown は状態が変わったときだけ出す（連続する unknown は数えるだけ。notify_stats の held）
+  通知するクラスは notify.h の NOTIFY_CLASSES で絞る（既定 dog 4・crying_baby 3・sneezing 9・crackling_fire 2）。対象外のクラスが1位のときは LED も JSON も出さず、数だけ集計行の offlist に出す。番号が出力順とずれていないかは NOTIFY_CLASS_NAMES との照合で notify_init が確かめる
+  音量の門は NOTIFY_GATE_PEAK_DBFS（既定 -99 ＝ 切）。窓のピーク（win 行の peak と同じ値。RMS ではなくピークなのは犬の1声やくしゃみのような短く鋭い音を落とさないため）がこの dBFS 未満なら unknown 扱いにする。しきい値は notify_init が dBFS から int16 の振幅に直して持つ（毎窓 log を取らない）。止めた数は集計行の gated
+  「通知しない状態」（unknown・対象外・門で止めた）が続くあいだ JSON は出ない。状態が変わって unknown になったときだけ1行出る
+  確率のしきい値を 0.5 より上げる・同じクラスの連続を条件にする、はまだ入れていない（対照試験の結果を見てから）
+  lat_ms は「窓の最後のサンプルを tap_ring に書いた時刻（TAP_WIN_INFO の t_ready）」から「JSON をレポータに渡す直前」まで。窓の 975ms 自体は含まないので数十 ms になる。UART に出るまでの待ちは含まず、その分は reporter の行の loglag=（log_lag_max_us）に出る。両方足したものが実測の通知遅延
+  loglag は CSV ダンプのあと「レポータがキューを出し切った時点」で 0 に戻す。ダンプ中はレポータが行を捨てるだけで測らず、ダンプの前後に溜まった行はダンプ直後にまとめて出るので、終わった瞬間に 0 にしてもその行たちでまた最大値が立つ（実機のログ 4402 行目で確認）。dump_all の末尾で log_lag_reset_when_idle() で予約し、レポータが TMO_POL で空を見つけたときに log_lag_note_idle() で下ろす。前処理セルフテスト（と NPU_PT_TEST の予行）の直後も同じ予約をする。優先度15 の推論タスクがセルフテストで 300ms ほど CPU を離さず、その間に溜まった行の待ちで最大値が立つため（ダンプ直後のリセット自体は実機で効いている＝8432us を確認）
+  LED は赤（PG10）。検出で点灯し、1秒後にアラームハンドラで消す。続けて検出したらアラームを張り直す。unknown では点けない
+  tap の見張り（no window for 2000ms → tap final）は最初の窓を取れてから働かせる。起動直後はビープとプリフィルでサンプルだけが溜まり窓がまだそろわないので、head>0 だけを見ると偽の final が出ていた
 PowerShell 5.1 用スクリプトは UTF-8 BOM 付きで保存する（BOM 無しだと日本語コメントで param() が壊れる）
 ビルド設定
 Appli プロジェクトは親の Drivers/STM32N6xx_HAL_Driver/Src/ を .project で個別参照している。新しい HAL を使う場合:

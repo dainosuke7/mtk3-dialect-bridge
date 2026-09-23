@@ -5,12 +5,15 @@
 
 # Add inputs and outputs from these tool invocations to the build variables 
 C_SRCS += \
+../Application/aed/notify.c \
 ../Application/aed/preproc.c 
 
 OBJS += \
+./Application/aed/notify.o \
 ./Application/aed/preproc.o 
 
 C_DEPS += \
+./Application/aed/notify.d \
 ./Application/aed/preproc.d 
 
 
@@ -21,7 +24,7 @@ Application/aed/%.o Application/aed/%.su Application/aed/%.cyclo: ../Application
 clean: clean-Application-2f-aed
 
 clean-Application-2f-aed:
-	-$(RM) ./Application/aed/preproc.cyclo ./Application/aed/preproc.d ./Application/aed/preproc.o ./Application/aed/preproc.su
+	-$(RM) ./Application/aed/notify.cyclo ./Application/aed/notify.d ./Application/aed/notify.o ./Application/aed/notify.su ./Application/aed/preproc.cyclo ./Application/aed/preproc.d ./Application/aed/preproc.o ./Application/aed/preproc.su
 
 .PHONY: clean-Application-2f-aed
 

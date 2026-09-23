@@ -6,9 +6,11 @@
 #include "npu_rt.h"
 #include "npu_selftest.h"
 #include "../aed/preproc.h"
+#include "../aed/notify.h"
 #include "../audio/tap_ring.h"
 #include "../audio/audio_task.h"
 #include "../trace/trace.h"	// trace_muted(), trace_busy(), trace_cyc_per_us()
+#include "../trace/log.h"	// log_printf() (出力はレポータ経由。tm_printf を直接呼ばない)
 
 /*
  * 1: 起動後のパススルー中に、ボードの前処理 (Application/aed/preproc.c) の結果を PC と
@@ -31,7 +33,7 @@
 #endif
 
 /*
- * 推論タスク (Phase 1 タスク7 で骨組み。タスク9 で前処理と推論を載せる)
+ * 推論タスク (タスク7 で骨組み、タスク8 で前処理、タスク9 で本番の 前処理→推論→通知)
  *
  * ll_aton (npu_rt.c) を呼ぶのはこのタスクだけにする。
  *   - ll_aton はスレッドセーフでない (OSAL は BARE_METAL でロックが無い)
@@ -47,8 +49,9 @@
  *      (usermain は推論時間を音声の負荷なしで測るため、音声を始める前にこれを待つ)
  *   2. タップリングから窓を取り出す。書き手 (task_pcm) が窓をそろえたときにセマフォで起きる
  *      - 窓を静的バッファ win_buf へコピー
+ *      - preproc_run で log-mel にして npu_rt_infer で推論し、notify_decide の判定を
+ *        notify_window で通知する (JSON 1行と赤 LED)。通知は診断の表示より先に行う
  *      - 音量 (RMS・ピーク) と、前の窓の末尾 240 サンプルとの一致を確かめて1行表示
- *      - タスク9: ここで win_buf を log-mel にして推論する
  *   3. PREPROC_TEST が 1 なら、パススルー稼働中に1回だけ前処理セルフテストを行う。
  *      実録音2本 (aed_ref_clips.h の生 PCM) をボードで log-mel にして、PC が同じ音から
  *      作った int8 テンソルと 6144 要素すべてを比べ、そのテンソルで推論して1位を PC と並べる。
@@ -58,12 +61,18 @@
  *      タスク6 の npu pt test (同じ優先度の別ループで 960ms ごとに推論) をここへ統合した。
  *      間隔はタップリングの窓 (15360 サンプル = 約 960ms) で決まる
  *
- * 優先度 15 は音声 (task_pcm 5、task_audio・task_1・task_2 10) より低く、reporter (20) より高い。
- * POLLING の推論中はこのタスクが CPU を回し続けるので、推論のあいだ reporter と dump は動けない。
+ * 優先度 15 は音声 (task_pcm 5、task_audio・task_1 10) より低く、reporter (20) より高い。
+ * POLLING の推論中はこのタスクが CPU を回し続けるので、推論のあいだ reporter と dump は動けない
+ * (出したい行はメッセージバッファに溜まり、推論が終わってから出る)。
+ * 表示はすべて log_printf で、UART に書くのは reporter だけ (Application/trace/log.h)。
  */
 
-/* 1: パススルー中の推論の予行を行う。0 で無効 */
-#define NPU_PT_TEST		(1)
+/*
+ * 1: パススルー中に乱数入力の推論を10回行う (タスク7 の予行)。
+ * タスク9 で窓ごとの本番の推論が入ったので既定は 0。予行だけをもう一度見るときに 1 にする
+ * (本番の推論と同じ窓で2回推論することになる)
+ */
+#define NPU_PT_TEST		(0)
 
 #define INFER_TASK_PRI		(15)
 #define INFER_TASK_STKSZ	(8 * 1024)
@@ -103,6 +112,58 @@ LOCAL H		prev_tail[TAP_WIN_OVERLAP];
 LOCAL BOOL	have_prev = FALSE;
 LOCAL UW	prev_pos;
 LOCAL UW	seam_ok_n, seam_ng_n;
+
+/* NPU に渡す入力 (log-mel の結果)。静的領域。前処理セルフテストでも使う */
+LOCAL B		in_tensor[AED_PREPROC_OUT_LEN] __attribute__((aligned(32)));
+
+/* ---------------------------------------------------------------- */
+/* 本番の処理 (窓ごとに 前処理 → 推論 → 判定 → 通知)                    */
+/* ---------------------------------------------------------------- */
+
+LOCAL UW	run_n, run_err;			/* 推論できた窓の数 / 失敗した数 */
+LOCAL ER	run_last_er;
+LOCAL UW	pp_us_max, pp_us_sum, inf_us_max, inf_us_sum;
+LOCAL INT	last_cls = AED_CLS_UNKNOWN;	/* 窓の1行に出すための、直前の判定 */
+LOCAL INT	last_p100;
+
+/*
+ * 窓1つを処理する。preproc_run → npu_rt_infer → notify_decide → notify_window。
+ * 通知 (JSON と LED) は notify_window が行う
+ */
+LOCAL BOOL process_window(const TAP_WIN_INFO *info, UW peak, UW *pp_us, UW *inf_us)
+{
+	float	out[NPU_RT_OUT_CLASSES], p;
+	INT	cls;
+	ER	er;
+
+	*pp_us  = preproc_run(win_buf, in_tensor);
+	er      = npu_rt_infer(in_tensor, out, inf_us);
+	if(er != E_OK) {
+		run_err++;
+		run_last_er = er;
+		if(!trace_muted()) {
+			log_printf("win %u: inference failed er=%d after %u us\n",
+					info->seq, er, *inf_us);
+		}
+		return FALSE;
+	}
+
+	run_n++;
+	pp_us_sum  += *pp_us;
+	inf_us_sum += *inf_us;
+	if(*pp_us > pp_us_max)   pp_us_max  = *pp_us;
+	if(*inf_us > inf_us_max) inf_us_max = *inf_us;
+
+	/*
+	 * 診断の1行にはゲートより前の判定を出す (窓の 1位が何だったかは残したい)。
+	 * 通知するかどうか (対象クラスか、ピークが足りるか) は notify_window が決める
+	 */
+	cls       = notify_decide(out, &p);
+	last_cls  = cls;
+	last_p100 = (INT)(p * 100.0f + 0.5f);
+	notify_window(info->seq, cls, p, peak, info->t_ready, info->lag_exact);
+	return TRUE;
+}
 
 /* ---------------------------------------------------------------- */
 /* 窓の確認                                                            */
@@ -166,21 +227,37 @@ LOCAL UW cyc_to_ns(UW cyc)
 	return (UW)(((uint64_t)cyc * 1000ULL) / trace_cyc_per_us());
 }
 
-/* 累計 (10分の確認で見る値をまとめて出す) */
+/* 累計 (10分の確認で見る値をまとめて出す)。1行が長くなるので分けて出す */
 LOCAL void show_summary(const char *why)
 {
 	TAP_STATS	st;
 	UW		under, over, late;
+	UW		n_out, n_held, n_offlist, n_gated, lat_max, lat_loose;
 
 	tap_ring_stats(&st);
 	audio_pt_counts(&under, &over, &late);
-	tm_printf((UB*)"tap %s: windows=%u (expected %u from %u samples) overrun=%u torn=%u skipped=%u"
-			" seam ok=%u NG=%u | lag max=%uus (%u of them lower bounds)"
-			" | tap write max=%uns avg=%uns (%u calls) | audio under=%u over=%u late=%u\n",
-			why, st.windows, tap_ring_expected_windows(), st.head, st.overrun, st.torn, st.skipped,
-			seam_ok_n, seam_ng_n, st.lag_max_us, st.late,
-			cyc_to_ns(st.wr_max_cyc), (st.wr_calls > 0) ? cyc_to_ns(st.wr_sum_cyc / st.wr_calls) : 0,
-			st.wr_calls, under, over, late);
+	notify_stats(&n_out, &n_held, &n_offlist, &n_gated, &lat_max, &lat_loose);
+
+	log_printf("tap %s: windows=%u (expected %u from %u samples) overrun=%u torn=%u skipped=%u"
+			" seam ok=%u NG=%u\n",
+			why, st.windows, tap_ring_expected_windows(), st.head, st.overrun, st.torn,
+			st.skipped, seam_ok_n, seam_ng_n);
+	log_printf("  tap lag max=%uus (%u of them lower bounds) | tap write max=%uns avg=%uns (%u calls)\n",
+			st.lag_max_us, st.late, cyc_to_ns(st.wr_max_cyc),
+			(st.wr_calls > 0) ? cyc_to_ns(st.wr_sum_cyc / st.wr_calls) : 0, st.wr_calls);
+	log_printf("  audio under=%u over=%u late=%u | aed run=%u err=%u (last er=%d)\n",
+			under, over, late, run_n, run_err, run_last_er);
+	log_printf("  preproc max=%uus avg=%uus | infer max=%uus avg=%uus\n",
+			pp_us_max, (run_n > 0) ? pp_us_sum / run_n : 0,
+			inf_us_max, (run_n > 0) ? inf_us_sum / run_n : 0);
+	/*
+	 * 判定の内訳: out=出した行 / held=続いた unknown で出さなかった窓 /
+	 * offlist=通知対象外のクラスだった窓 / gated=音量の門で止めた窓
+	 */
+	log_printf("  notify out=%u held=%u offlist=%u gated=%u lat max=%uus (%u lower bounds)\n",
+			n_out, n_held, n_offlist, n_gated, lat_max, lat_loose);
+	log_printf("  log sent=%u dropped=%u lag max=%uus\n",
+			log_sent(), log_dropped(), log_lag_max_us());
 }
 
 /* ---------------------------------------------------------------- */
@@ -202,14 +279,14 @@ LOCAL void pt_report(void)
 	INT	k;
 	BOOL	pass;
 
-	tm_printf((UB*)"npu pt test: fixed-input inference on %d tap windows during passthrough (task pri %d)\n",
+	log_printf("npu pt test: fixed-input inference on %d tap windows during passthrough (task pri %d)\n",
 			PT_REPEAT, INFER_TASK_PRI);
 	for(k = 0; k < PT_REPEAT; k++) {
 		if(pt_er[k] != E_OK) {
-			tm_printf((UB*)"  [%2d] er=%d after %u us\n", k + 1, pt_er[k], pt_us[k]);
+			log_printf("  [%2d] er=%d after %u us\n", k + 1, pt_er[k], pt_us[k]);
 			continue;
 		}
-		tm_printf((UB*)"  [%2d] %6u us, max diff vs first = %d x1e-4%s\n", k + 1, pt_us[k], pt_dif[k],
+		log_printf("  [%2d] %6u us, max diff vs first = %d x1e-4%s\n", k + 1, pt_us[k], pt_dif[k],
 				pt_same[k] ? " (bit-identical)" : "");
 		if(pt_us[k] < t_min) t_min = pt_us[k];
 		if(pt_us[k] > t_max) t_max = pt_us[k];
@@ -217,17 +294,17 @@ LOCAL void pt_report(void)
 		n_ok++;
 	}
 	if(n_ok > 0) {
-		tm_printf((UB*)"  inference time: min=%u mean=%u max=%u us (%u of %d runs OK)\n",
+		log_printf("  inference time: min=%u mean=%u max=%u us (%u of %d runs OK)\n",
 				t_min, t_sum / n_ok, t_max, n_ok, PT_REPEAT);
 	}
-	tm_printf((UB*)"  audio before: under=%u over=%u late=%u / after: under=%u over=%u late=%u\n",
+	log_printf("  audio before: under=%u over=%u late=%u / after: under=%u over=%u late=%u\n",
 			pt_u0, pt_o0, pt_l0, pt_u1, pt_o1, pt_l1);
 
 	pass = (n_ok == PT_REPEAT) && (pt_u1 == pt_u0) && (pt_o1 == pt_o0) && (pt_l1 == pt_l0);
 	for(k = 0; k < PT_REPEAT; k++) {
 		if(pt_er[k] == E_OK && pt_dif[k] > NPU_SELFTEST_TOL_X1E4) pass = FALSE;
 	}
-	tm_printf((UB*)"npu pt test %s (all runs OK, output within %d x1e-4 of first, no new under/over/late)\n",
+	log_printf("npu pt test %s (all runs OK, output within %d x1e-4 of first, no new under/over/late)\n",
 			pass ? "PASS" : "FAIL", NPU_SELFTEST_TOL_X1E4);
 }
 
@@ -252,6 +329,7 @@ LOCAL void pt_step(BOOL npu_ok)
 	if(trace_busy()) return;
 	pt_report();
 	pt_reported = TRUE;
+	log_lag_reset_when_idle();	/* 予行の間に溜まった行の待ちを持ち越さない (pp_step と同じ) */
 }
 #endif	/* NPU_PT_TEST */
 
@@ -270,10 +348,9 @@ _Static_assert(AED_REF_ZP == AED_PREPROC_ZP, "quantization zero point");
 /* 差が 1 を超える要素があれば前処理の移植が合っていない (float32 と float64 の差では出ない) */
 #define PP_MAX_ABS_DIFF		(1)
 
-LOCAL B		pp_tensor[AED_PREPROC_OUT_LEN] __attribute__((aligned(32)));	/* 前処理の結果 */
 LOCAL BOOL	pp_done = FALSE;
 
-/* tm_printf は浮動小数点を出せないので、1万倍して丸めた整数で出す (npu_selftest.c と同じ) */
+/* 浮動小数点は出せないので、1万倍して丸めた整数で出す (npu_selftest.c と同じ) */
 LOCAL INT x10k(float v)
 {
 	return (INT)(v * 10000.0f + ((v >= 0.0f) ? 0.5f : -0.5f));
@@ -332,55 +409,55 @@ LOCAL void pp_one(INT k, BOOL npu_ok, UW *n_same, UW *n_diff, INT *max_abs, UW *
 	t_ort = (INT)aed_ref_top_ort[k];
 	t_flt = (INT)aed_ref_top_noopt[k];
 
-	tm_printf((UB*)"  [%d] %s (%s)\n", k, aed_ref_file[k], aed_ref_class_names[aed_ref_truth[k]]);
+	log_printf("  [%d] %s (%s)\n", k, aed_ref_file[k], aed_ref_class_names[aed_ref_truth[k]]);
 
 	/* 生 PCM からボードで log-mel を作る */
-	pp_us = preproc_run(aed_ref_pcm[k], pp_tensor);
-	tm_printf((UB*)"      preproc %u us\n", pp_us);
+	pp_us = preproc_run(aed_ref_pcm[k], in_tensor);
+	log_printf("      preproc %u us\n", pp_us);
 
 	/* PC のテンソルと1バイトずつ比べる */
-	pp_compare(pp_tensor, aed_ref_tensor[k], n_same, n_diff, max_abs, n_big, &at);
-	tm_printf((UB*)"      int8 vs PC: same %u diff %u of %d, max |d| %d, |d|>%d: %u\n",
+	pp_compare(in_tensor, aed_ref_tensor[k], n_same, n_diff, max_abs, n_big, &at);
+	log_printf("      int8 vs PC: same %u diff %u of %d, max |d| %d, |d|>%d: %u\n",
 			*n_same, *n_diff, AED_PREPROC_OUT_LEN, *max_abs, PP_MAX_ABS_DIFF, *n_big);
 	if(at >= 0) {
 		/* 並びは out[col + 96 * mel] (preproc.h)。どのメル・列でずれたか */
-		tm_printf((UB*)"      worst at mel %d col %d: board %d, pc %d\n",
+		log_printf("      worst at mel %d col %d: board %d, pc %d\n",
 				at / AED_PREPROC_COLS, at % AED_PREPROC_COLS,
-				(INT)pp_tensor[at], (INT)aed_ref_tensor[k][at]);
+				(INT)in_tensor[at], (INT)aed_ref_tensor[k][at]);
 	}
 
 	*top_ok     = FALSE;
 	*ref_top_ok = FALSE;
 	if(!npu_ok) {
-		tm_printf((UB*)"      inference skipped (NPU not ready)\n");
+		log_printf("      inference skipped (NPU not ready)\n");
 		return;
 	}
 
 	/* ボードのテンソルで推論 */
-	er = npu_selftest_infer(pp_tensor, out, &us);
+	er = npu_rt_infer(in_tensor, out, &us);
 	if(er != E_OK) {
-		tm_printf((UB*)"      board tensor: inference failed er=%d after %u us\n", er, us);
+		log_printf("      board tensor: inference failed er=%d after %u us\n", er, us);
 	} else {
 		top     = argmax(out);
 		*top_ok = (top == t_ort) || (top == t_flt);
-		tm_printf((UB*)"      board tensor -> top1 %d %s p=%d x1e-4 (%u us) %s\n",
+		log_printf("      board tensor -> top1 %d %s p=%d x1e-4 (%u us) %s\n",
 				top, aed_ref_class_names[top], x10k(out[top]), us,
 				*top_ok ? "ok" : "MISMATCH");
 	}
 
 	/* PC のテンソルで推論 (前処理の差と NPU の差を切り分ける) */
-	er = npu_selftest_infer(aed_ref_tensor[k], out, &us);
+	er = npu_rt_infer(aed_ref_tensor[k], out, &us);
 	if(er != E_OK) {
-		tm_printf((UB*)"      pc tensor: inference failed er=%d after %u us\n", er, us);
+		log_printf("      pc tensor: inference failed er=%d after %u us\n", er, us);
 	} else {
 		top         = argmax(out);
 		*ref_top_ok = (top == t_ort) || (top == t_flt);
-		tm_printf((UB*)"      pc tensor    -> top1 %d %s p=%d x1e-4 (%u us) %s\n",
+		log_printf("      pc tensor    -> top1 %d %s p=%d x1e-4 (%u us) %s\n",
 				top, aed_ref_class_names[top], x10k(out[top]), us,
 				*ref_top_ok ? "ok" : "MISMATCH");
 	}
 
-	tm_printf((UB*)"      PC reference: ort top1 %d %s p=%d / noopt top1 %d %s p=%d (x1e-4)\n",
+	log_printf("      PC reference: ort top1 %d %s p=%d / noopt top1 %d %s p=%d (x1e-4)\n",
 			t_ort, aed_ref_class_names[t_ort], x10k(aed_ref_prob_ort[k]),
 			t_flt, aed_ref_class_names[t_flt], x10k(aed_ref_prob_noopt[k]));
 }
@@ -395,18 +472,18 @@ LOCAL void pp_report(BOOL npu_ok)
 
 	audio_pt_counts(&u0, &o0, &l0);
 
-	tm_printf((UB*)"preproc test: %d clips, board log-mel (Application/aed/preproc.c) vs PC"
+	log_printf("preproc test: %d clips, board log-mel (Application/aed/preproc.c) vs PC"
 			" (scripts/aed_clips.py)\n", AED_REF_CLIP_COUNT);
-	tm_printf((UB*)"  %d x int16 -> int8 1x%dx%d (%d B), zp=%d, mel LUT %u coefs (expected %d)\n",
+	log_printf("  %d x int16 -> int8 1x%dx%d (%d B), zp=%d, mel LUT %u coefs (expected %d)\n",
 			AED_PREPROC_SAMPLES, AED_PREPROC_MELS, AED_PREPROC_COLS, AED_PREPROC_OUT_LEN,
 			AED_PREPROC_ZP, preproc_mel_coefs(), AED_PREPROC_MEL_COEFS);
 	if(AED_REF_SCALE != AED_PREPROC_SCALE) {
-		tm_printf((UB*)"  [WARN] quantization scale differs from the PC header:"
+		log_printf("  [WARN] quantization scale differs from the PC header:"
 				" check AED_PREPROC_SCALE against AED_REF_SCALE\n");
 		pass = FALSE;
 	}
 	if(preproc_mel_coefs() != AED_PREPROC_MEL_COEFS) {
-		tm_printf((UB*)"  [WARN] mel LUT size differs from the PC / ST tables\n");
+		log_printf("  [WARN] mel LUT size differs from the PC / ST tables\n");
 		pass = FALSE;
 	}
 
@@ -420,20 +497,20 @@ LOCAL void pp_report(BOOL npu_ok)
 		if(ref_top_ok) n_ref_top++;
 	}
 
-	tm_printf((UB*)"  totals: same %u diff %u of %d, max |d| %d, |d|>%d: %u\n",
+	log_printf("  totals: same %u diff %u of %d, max |d| %d, |d|>%d: %u\n",
 			s_same, s_diff, AED_PREPROC_OUT_LEN * AED_REF_CLIP_COUNT, s_max,
 			PP_MAX_ABS_DIFF, s_big);
-	tm_printf((UB*)"  top1 == PC: board tensor %d/%d, pc tensor %d/%d\n",
+	log_printf("  top1 == PC: board tensor %d/%d, pc tensor %d/%d\n",
 			n_top, AED_REF_CLIP_COUNT, n_ref_top, AED_REF_CLIP_COUNT);
 
 	if(s_big > 0) pass = FALSE;
 	if(npu_ok && n_top != AED_REF_CLIP_COUNT) pass = FALSE;
-	tm_printf((UB*)"preproc test %s (no |d| > %d, and top1 from the board tensor matches PC%s)\n",
+	log_printf("preproc test %s (no |d| > %d, and top1 from the board tensor matches PC%s)\n",
 			pass ? "PASS" : "FAIL", PP_MAX_ABS_DIFF,
 			npu_ok ? "" : " [inference not run]");
 
 	audio_pt_counts(&u1, &o1, &l1);
-	tm_printf((UB*)"  audio before: under=%u over=%u late=%u / after: under=%u over=%u late=%u\n",
+	log_printf("  audio before: under=%u over=%u late=%u / after: under=%u over=%u late=%u\n",
 			u0, o0, l0, u1, o1, l1);
 }
 
@@ -454,6 +531,13 @@ LOCAL void pp_step(BOOL npu_ok)
 
 	pp_report(npu_ok);
 	pp_done = TRUE;
+
+	/*
+	 * セルフテストのあいだ (前処理2本 + 推論4回で 300ms ほど) この優先度15のタスクが
+	 * CPU を離さないので、その間に溜まった行の待ちで loglag の最大値が立つ。
+	 * トレースのダンプと同じように、出し切ったところで測り直す
+	 */
+	log_lag_reset_when_idle();
 }
 
 #endif	/* HAVE_REF_CLIPS */
@@ -463,36 +547,50 @@ LOCAL void pp_step(BOOL npu_ok)
 LOCAL void task_infer(INT stacd, void *exinf)
 {
 	TAP_WIN_INFO	info;
-	TAP_STATS	st;
-	UW		rms, peak;
+	UW		rms, peak, pp_us, inf_us;
 	INT		dbfs;
 	char		bar[LVL_BAR_LEN + 1];
 	const char	*seam;
-	BOOL		npu_ok = FALSE, idle = FALSE;
+	BOOL		npu_ok = FALSE, idle = FALSE, ready, have_window = FALSE, done;
 	ER		er;
+
+	/*
+	 * ここの表示はまだレポータが無いので直接 UART に出る (log.h)。
+	 * 音声が動き出してからの出力はすべてレポータ経由になる
+	 */
 
 	/* 前処理の表 (窓・ツイドル・メルフィルタ)。double を使うのでこのタスクで作る */
 	er = preproc_init();
-	tm_printf((UB*)"preproc_init: ret=%d (mel LUT %u coefs, expected %d)\n",
+	log_printf("preproc_init: ret=%d (mel LUT %u coefs, expected %d)\n",
 			er, preproc_mel_coefs(), AED_PREPROC_MEL_COEFS);
 #if !PREPROC_TEST
-	tm_printf((UB*)"preproc test: SKIP (PREPROC_TEST=0)\n");
+	log_printf("preproc test: SKIP (PREPROC_TEST=0)\n");
 #elif !HAVE_REF_CLIPS
-	tm_printf((UB*)"preproc test: SKIP (aed_ref_clips.h not found: run scripts/aed_clips.py)\n");
+	log_printf("preproc test: SKIP (aed_ref_clips.h not found: run scripts/aed_clips.py)\n");
 #endif
 
 	er = npu_rt_init();
-	tm_printf((UB*)"npu_rt_init: ret=%d\n", er);
+	log_printf("npu_rt_init: ret=%d\n", er);
 	if(er == E_OK) npu_ok = npu_selftest();
 	(void)tk_sig_sem(semid_done, 1);
+
+	ready = npu_ok && preproc_ready();
+	if(!ready) {
+		log_printf("aed: window processing disabled (npu_ok=%d preproc=%d)\n",
+				npu_ok ? 1 : 0, preproc_ready() ? 1 : 0);
+	}
 
 	for(;;) {
 		er = tap_ring_get_window(win_buf, WIN_WAIT_MS, &info);
 		if(er == E_TMOUT) {
-			/* 音声が止まった (パススルーの規定時間が過ぎた等)。始まる前 (head=0) は黙る */
-			tap_ring_stats(&st);
-			if(!idle && st.head > 0 && !trace_muted()) {
-				tm_printf((UB*)"tap: no window for %d ms (audio stopped?)\n", WIN_WAIT_MS);
+			/*
+			 * 音声が止まった (パススルーの規定時間が過ぎた等)。
+			 * 1つも窓を受け取っていないうちは見張らない (起動直後は、ビープと
+			 * プリフィルの間にサンプルだけが溜まって窓がまだそろわないので、
+			 * head > 0 だけを見ると偽の final が出る)
+			 */
+			if(!idle && have_window && !trace_muted()) {
+				log_printf("tap: no window for %d ms (audio stopped?)\n", WIN_WAIT_MS);
 				show_summary("final");
 				idle = TRUE;
 			}
@@ -501,17 +599,26 @@ LOCAL void task_infer(INT stacd, void *exinf)
 		if(er != E_OK) {
 			/* 上書きされていた (E_OBJ) / コピー中に上書きされた (E_IO)。読み位置は最新の窓へ進んでいる */
 			if(!trace_muted()) {
-				tm_printf((UB*)"tap: window lost (%s), jumped to the newest window\n",
+				log_printf("tap: window lost (%s), jumped to the newest window\n",
 						(er == E_OBJ) ? "overwritten before read" : "overwritten while copying");
 			}
 			continue;
 		}
-		idle = FALSE;
+		idle        = FALSE;
+		have_window = TRUE;
 
 		window_level(win_buf, &rms, &peak, &dbfs);
 		seam = seam_check(&info);
 
-		/* タスク9: ここで win_buf を log-mel にして推論する */
+		/*
+		 * 本番: 前処理 → 推論 → 判定 → 通知 (JSON と LED)。
+		 * 下の窓の1行より先に行う。通知を先にレポータへ渡すことで、診断の行が
+		 * UART を先に使って JSON が遅れるのを避ける (遅れは JSON の lat_ms と
+		 * reporter の loglag= で測っている)
+		 */
+		pp_us  = 0;
+		inf_us = 0;
+		done   = ready ? process_window(&info, peak, &pp_us, &inf_us) : FALSE;
 
 #if NPU_PT_TEST
 		pt_step(npu_ok);
@@ -519,15 +626,17 @@ LOCAL void task_infer(INT stacd, void *exinf)
 #if HAVE_REF_CLIPS
 		pp_step(npu_ok);
 #endif
-#if !NPU_PT_TEST && !HAVE_REF_CLIPS
-		(void)npu_ok;
-#endif
 
 		if(!trace_muted()) {
 			level_bar(dbfs, bar);
-			tm_printf((UB*)"win %4u pos=%8u %4ddBFS [%s] rms=%5u peak=%5u seam=%s lag=%s%uus\n",
+			log_printf("win %4u pos=%8u %4ddBFS [%s] rms=%5u peak=%5u seam=%s lag=%s%uus\n",
 					info.seq, info.pos, dbfs, bar, rms, peak, seam,
 					info.lag_exact ? "" : ">=", info.lag_us);
+			if(done) {
+				log_printf("  -> %-15s p=%d.%02d  preproc=%uus infer=%uus\n",
+						notify_class_name(last_cls), last_p100 / 100,
+						last_p100 % 100, pp_us, inf_us);
+			}
 			if(((info.seq + 1U) % SUMMARY_EVERY) == 0) show_summary("total");
 		}
 	}
