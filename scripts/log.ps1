@@ -27,6 +27,9 @@ $sp = New-Object System.IO.Ports.SerialPort $Port, $Baud, 'None', 8, 'One'
 $sp.Handshake   = 'None'     # フロー制御なし
 $sp.ReadTimeout = 250
 $sp.NewLine     = "`n"
+# SerialPort の既定は ASCII で、ボードが出す日本語 (READY の区切りなど) が ? に化ける。
+# ASCII は UTF-8 の一部なので、既存の英数字だけの出力は変わらない
+$sp.Encoding    = [System.Text.Encoding]::UTF8
 
 try {
     $sp.Open()

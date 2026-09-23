@@ -543,6 +543,37 @@ LOCAL void pp_step(BOOL npu_ok)
 #endif	/* HAVE_REF_CLIPS */
 
 /* ---------------------------------------------------------------- */
+/* 起動確認の終わりの区切り                                            */
+/* ---------------------------------------------------------------- */
+
+/*
+ * 起動時の確認 (トレースの記録と CSV ダンプ、前処理セルフテスト、予行) がすべて終わって、
+ * 窓ごとの本番の処理だけが続く状態になったことを1回だけ知らせる。
+ * ログを後から読むとき、ここより後の win 行と JSON だけを見ればよいと分かるように
+ */
+LOCAL BOOL ready_shown = FALSE;
+
+LOCAL void show_ready_banner(BOOL npu_ok)
+{
+	(void)npu_ok;
+
+	if(ready_shown) return;
+	if(!audio_passthrough_active()) return;
+	if(trace_busy()) return;		/* トレースの記録か CSV ダンプがまだ動いている */
+#if HAVE_REF_CLIPS
+	if(!pp_done) return;			/* 前処理セルフテストがまだ */
+#endif
+#if NPU_PT_TEST
+	if(npu_ok && !pt_reported) return;	/* 予行がまだ (NPU が無いときは待たない) */
+#endif
+
+	log_printf("====================================\n");
+	log_printf("READY  起動確認おわり。ここから本番\n");
+	log_printf("====================================\n");
+	ready_shown = TRUE;
+}
+
+/* ---------------------------------------------------------------- */
 
 LOCAL void task_infer(INT stacd, void *exinf)
 {
@@ -628,6 +659,9 @@ LOCAL void task_infer(INT stacd, void *exinf)
 #endif
 
 		if(!trace_muted()) {
+			/* 起動確認が終わったところで区切りを出す (win 行が再開する前) */
+			show_ready_banner(npu_ok);
+
 			level_bar(dbfs, bar);
 			log_printf("win %4u pos=%8u %4ddBFS [%s] rms=%5u peak=%5u seam=%s lag=%s%uus\n",
 					info.seq, info.pos, dbfs, bar, rms, peak, seam,

@@ -20,7 +20,7 @@ Appli/.cproject（Debug 構成）	プリプロセッサ定義 LL_ATON_PLATFORM=L
 Startup タブに mtk3bsp2_stm32n657_Appli が追加されていること
 Appli 単体の構成で起動すると usermain() に到達しない
 直前に FSBL をビルドしておく
-ログ: powershell scripts/log.ps1 → logs/uart_<日時>.log（走るたびに別ファイル。固定名に追記すると試験の行が混ざるため。名前を決めたいときや追記したいときは -Out で渡す）。-Timestamp で各行の先頭に PC の時計 HH:mm:ss.fff を付ける（aed_play_test.py のログと同じ形式で、対照試験の突き合わせに使う。既定はオフで出力は従来どおり。時刻はその行の先頭が届いた読み取りのもの。ReadExisting は行の途中で返るので、改行が来るまで溜めてから1行として書いている）
+ログ: powershell scripts/log.ps1 → logs/uart_<日時>.log（走るたびに別ファイル。固定名に追記すると試験の行が混ざるため。名前を決めたいときや追記したいときは -Out で渡す）。-Timestamp で各行の先頭に PC の時計 HH:mm:ss.fff を付ける（aed_play_test.py のログと同じ形式で、対照試験の突き合わせに使う。既定はオフで出力は従来どおり。時刻はその行の先頭が届いた読み取りのもの。ReadExisting は行の途中で返るので、改行が来るまで溜めてから1行として書いている）。SerialPort の Encoding は UTF-8 にしている（既定は ASCII で、ボードが出す日本語＝READY の区切りが ? に化ける。ASCII は UTF-8 の一部なので英数字だけの出力は変わらない）
 COM ポートは1プロセスしか開けない。他のターミナルを閉じてから
 重みの書き込み（外部フラッシュ 0x70180000、署名不要）:
   STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -el <ExternalLoader>/MX66UW1G45G_STM32N6570-DK.stldr -hardRst -w aed_weights.hex
@@ -130,6 +130,7 @@ epoch フック（npu_rt_set_epoch_hook）は今は呼ばれない。stai_networ
   lat_ms は「窓の最後のサンプルを tap_ring に書いた時刻（TAP_WIN_INFO の t_ready）」から「JSON をレポータに渡す直前」まで。窓の 975ms 自体は含まないので数十 ms になる。UART に出るまでの待ちは含まず、その分は reporter の行の loglag=（log_lag_max_us）に出る。両方足したものが実測の通知遅延
   loglag は CSV ダンプのあと「レポータがキューを出し切った時点」で 0 に戻す。ダンプ中はレポータが行を捨てるだけで測らず、ダンプの前後に溜まった行はダンプ直後にまとめて出るので、終わった瞬間に 0 にしてもその行たちでまた最大値が立つ（実機のログ 4402 行目で確認）。dump_all の末尾で log_lag_reset_when_idle() で予約し、レポータが TMO_POL で空を見つけたときに log_lag_note_idle() で下ろす。前処理セルフテスト（と NPU_PT_TEST の予行）の直後も同じ予約をする。優先度15 の推論タスクがセルフテストで 300ms ほど CPU を離さず、その間に溜まった行の待ちで最大値が立つため（ダンプ直後のリセット自体は実機で効いている＝8432us を確認）
   LED は赤（PG10）。検出で点灯し、1秒後にアラームハンドラで消す。続けて検出したらアラームを張り直す。unknown では点けない
+  起動時の確認（トレースの記録と CSV ダンプ・前処理セルフテスト・予行）が全部終わって本番の窓ループだけになったところで、==== で囲んだ READY の3行を1回出す（infer_task.c の show_ready_banner。win 行が再開する前の位置）。ログを後から読むとき、ここより後だけを見ればよいと分かるようにするため
   tap の見張り（no window for 2000ms → tap final）は最初の窓を取れてから働かせる。起動直後はビープとプリフィルでサンプルだけが溜まり窓がまだそろわないので、head>0 だけを見ると偽の final が出ていた
 PowerShell 5.1 用スクリプトは UTF-8 BOM 付きで保存する（BOM 無しだと日本語コメントで param() が壊れる）
 ビルド設定
