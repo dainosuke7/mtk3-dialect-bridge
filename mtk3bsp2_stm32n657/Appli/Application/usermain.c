@@ -4,7 +4,8 @@
 #include "audio/audio_task.h"
 #include "extflash/extflash.h"
 #include "npu/npu_hw.h"
-#include "npu/npu_selftest.h"
+#include "npu/infer_task.h"
+#include "audio/tap_ring.h"
 #include "fault/fault.h"
 #include "trace/trace.h"
 
@@ -227,12 +228,16 @@ EXPORT INT usermain(void)
 	er = npu_hw_init();
 	tm_printf((UB*)"npu_hw_init: ret=%d\n", er);
 
-	/* NPU タスク: 推論ランタイムの初期化と、固定入力での推論の自己テスト。
+	/* 推論用のタップリング。書き手 (task_pcm) と読み手 (推論タスク) が動き出す前に */
+	er = tap_ring_init();
+	tm_printf((UB*)"tap_ring_init: ret=%d\n", er);
+
+	/* 推論タスク: 推論ランタイムの初期化と自己テストの後、タップリングの窓を待つ。
 	 * ランタイムはスタックを多く使うので、この初期タスク (スタック 1KB) では呼ばない。
 	 * 自己テストが終わるまでここで待つ (推論時間を音声の負荷なしで測るため、音声より先に)。
-	 * npu_hw_init が失敗していればタスクの中で何もせずに終わる */
-	er = npu_task_start();
-	tm_printf((UB*)"npu_task_start: ret=%d\n", er);
+	 * npu_hw_init が失敗していれば自己テストを飛ばし、窓の確認だけ行う */
+	er = infer_task_start();
+	tm_printf((UB*)"infer_task_start: ret=%d\n", er);
 
 	/* 受け入れテスト (fault.h の FAULT_TEST)。1〜4なら戻ってこない */
 	fault_test_run();

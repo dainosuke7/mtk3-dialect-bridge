@@ -54,12 +54,13 @@ MIC_DET で外部マイクボード装着時はオンボードマイクがバイ
 優先度	タスク	役割
 5	task_pcm	DMA通知（イベントフラグ4ビット）を受けて入力変換・リング操作・出力充填
 10	task_audio, task_1, task_2	パススルー制御・統計表示 / LED 点滅
-15	task_npu	NPU ランタイムの初期化・推論（npu_selftest.c。ll_aton を呼ぶのはこのタスクだけ）
+15	task_infer	NPU ランタイムの初期化・自己テスト・タップリングの窓の取り出しと推論（infer_task.c。ll_aton を呼ぶのはこのタスクだけ）
 20	reporter	1秒レート表示
 32	dump	トレース状態機械・CSV ダンプ
 DMA コールバックは TRACE → カウンタ更新 → tk_set_flg だけ行い即 return
 出力バッファが不足したら無音を詰めて必ず全体を埋める
 PCM リング（pcm_fifo）は SPSC。消費者を増やせない。推論用は音声タスクが別リング（tap）にもコピーする
+タップリング（audio/tap_ring.c）: int16 x 32768（約2秒）。書き手は task_pcm の mic_process_half（pcm_fifo へ入れたのと同じ値、待たない）、読み手は task_infer だけ。head は累計サンプル数で単調増加。窓は 15600 サンプル、次の窓は 15360 後（ST と同じ、重なり 240）。読み手が待つ位置を書き手が越えたときだけセマフォを1回 signal する。上書きは取り出し前（E_OBJ）とコピー中（E_IO）で別に数え、読み位置を最新の窓へ飛ばす。書き手・読み手の順序は __DMB() で保つ（根拠は tap_ring.c の先頭）
 実装規約
 タスク間のデータ受け渡しは mbx / mbf。ISR→タスクの通知はイベントフラグかセマフォ
 複数文脈から触るカウンタは DI/EI で最小区間を保護（BASEPRI=1 で PendSV もマスクされるのでタスク間排他にも効く）
@@ -71,7 +72,7 @@ PCM リング（pcm_fifo）は SPSC。消費者を増やせない。推論用は
 フォルト可視化（Application/fault/）: 起動時にベクタテーブルを RAM にコピーし、未実装 IRQ 180本とフォルト例外5本を差し替え。 CFSR/BFAR/スタック上の PC を UART 直叩きで出してから停止。デバッガ接続時は __BKPT で止まるので F8 で続行
 FAULT_TEST（fault.h）: 0=無効 / 1=BusFault / 2=ゼロ除算 / 3=未実装IRQ / 4=STKOF。コミット時は必ず 0
 トレース（Application/trace/）: TRACE(id,arg) で (CYCCNT, id, arg) を記録。trace_start(ms) で区間記録し、終了後に CSV ダンプ。 ダンプ中は trace_muted() で他の出力を抑制
-テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）と NPU_PT_TEST（npu_selftest.c、パススルー中に 960ms 間隔で推論10回。推論タスクの予行）は Phase 1 の実機確認が済むまで 1
+テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）と NPU_PT_TEST（infer_task.c、パススルー中にタップリングの窓ごと＝約 960ms 間隔で乱数入力の推論10回。推論を載せたときの予行）は Phase 1 の実機確認が済むまで 1
 既知の罠
 tm_printf はカーネル起動前（knl_start_mtkernel より前）に使えない。 起動前の初期化関数は Error_Handler() を呼ばず、結果を変数に記録してカーネル起動まで到達させる
 FSBL がペリフェラルを触った状態でアプリが起動する。 HAL_xxx_Init が HAL_ERROR を返したら __HAL_RCC_xxx_FORCE_RESET()/RELEASE_RESET() で戻してから初期化（MDF1 で発生。XSPI2 は最初からリセットしてから初期化している）
@@ -93,7 +94,7 @@ ll_aton の LL_ATON_Init は NPU のバージョンが 0 の間読み直し続�
 ll_aton のエラー経路は newlib の printf / puts / assert を使う。newlib の malloc のヒープ（sysmem.c の _sbrk、_end から）は μT-Kernel のシステムメモリ（_end から）と重なるので使えない。npu_rt.c で __io_putchar（fault の UART 直接出力）と __assert_func（表示して fault_halt）を定義し、stdout を無バッファにして malloc を起こさない。newlib の malloc / バッファ付き stdio を使うコードを入れない
 推論のタイムアウトは ll_aton の弱いシンボル checkWatchdog() を npu_rt.c で定義して DWT で判定し、超えたら longjmp で npu_rt_run() に戻す（ll_aton は推論の途中の状態のまま。後始末は未実装で、以降の npu_rt_run は E_IO）。タイムアウト時は実行中の epoch block・ストリームエンジン・INTREG を表示する。LL_ATON_ASSERT の中で呼ばれるので NDEBUG を定義すると効かなくなる（npu_rt.c で #error）
 POLLING の推論中は、呼び出したタスクが LL_Streng_Wait で CPU を回し続ける。それより低い優先度のタスクは推論のあいだ動けない
-usermain は μT-Kernel の初期タスクで、スタックが 1KB（INITTASK_STKSZ、mtkernel/include/sys/inittask.h）しかなく優先度は 1。スタックを多く使う処理（NPU ランタイムは 1KB 超）や時間のかかる処理は専用タスクで行う。npu_rt_init / npu_rt_run は task_npu（スタック 8KB）からだけ呼ぶ
+usermain は μT-Kernel の初期タスクで、スタックが 1KB（INITTASK_STKSZ、mtkernel/include/sys/inittask.h）しかなく優先度は 1。スタックを多く使う処理（NPU ランタイムは 1KB 超）や時間のかかる処理は専用タスクで行う。npu_rt_init / npu_rt_run は task_infer（スタック 8KB）からだけ呼ぶ
 全タスクに TA_FPU が付く（config.h の ALWAYS_FPU_ATR=1）。float を使うタスクに属性を足す必要は無い
 推論の入力を書いたら SCB_CleanInvalidateDCache_by_Addr（clean だけでは不足。入力の領域は推論中に中間結果と出力の置き場に再利用される）。出力は最後の SW epoch が CPU で書くので invalidate 不要（npu_selftest.c の run_once）
 AED の末尾: epoch 29（NPU、Gemm）→ int8 x10 を 0x34350000 → epoch 30（SW、DequantizeLinear。scale/zp は外部フラッシュ 0x704a1590 / 0x704a1760）→ float x10 を 0x34350440 → epoch 31（SW、Softmax）→ 0x34350410。epoch 31 が 0x34350000〜 を作業域に使うので、推論後に int8 ロジットは残らない。途中の値は npu_rt_set_epoch_hook で取る（npu_selftest.c の logit_hook）

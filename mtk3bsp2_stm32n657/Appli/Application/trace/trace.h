@@ -49,6 +49,10 @@ typedef enum {
 	EV_INF_END	= 10,	/* 推論終了 (npu_rt_run)  arg=通算回数の下位8bit */
 	EV_NOTIFY	= 11,	/* Phase 2 */
 	EV_INF_TMO	= 12,	/* 推論タイムアウト  arg=経過ms (255で頭打ち) */
+	EV_TAP_WR_START	= 13,	/* タップリングへの書き込み開始 (task_pcm)  arg=MDF 割り込みの連番下位8bit */
+	EV_TAP_WR_END	= 14,	/* 同、終了                                  arg=同上 */
+	EV_TAP_READY	= 15,	/* 窓がそろい読み手を起こした (task_pcm)     arg=窓の番号下位8bit */
+	EV_TAP_GET	= 16,	/* 読み手が窓を取り出した (推論タスク)       arg=窓の番号下位8bit */
 	EV_MAX
 } trace_ev_t;
 

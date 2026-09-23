@@ -5,18 +5,21 @@
 
 # Add inputs and outputs from these tool invocations to the build variables 
 C_SRCS += \
+../Application/npu/infer_task.c \
 ../Application/npu/npu_cache_port.c \
 ../Application/npu/npu_hw.c \
 ../Application/npu/npu_rt.c \
 ../Application/npu/npu_selftest.c 
 
 OBJS += \
+./Application/npu/infer_task.o \
 ./Application/npu/npu_cache_port.o \
 ./Application/npu/npu_hw.o \
 ./Application/npu/npu_rt.o \
 ./Application/npu/npu_selftest.o 
 
 C_DEPS += \
+./Application/npu/infer_task.d \
 ./Application/npu/npu_cache_port.d \
 ./Application/npu/npu_hw.d \
 ./Application/npu/npu_rt.d \
@@ -30,7 +33,7 @@ Application/npu/%.o Application/npu/%.su Application/npu/%.cyclo: ../Application
 clean: clean-Application-2f-npu
 
 clean-Application-2f-npu:
-	-$(RM) ./Application/npu/npu_cache_port.cyclo ./Application/npu/npu_cache_port.d ./Application/npu/npu_cache_port.o ./Application/npu/npu_cache_port.su ./Application/npu/npu_hw.cyclo ./Application/npu/npu_hw.d ./Application/npu/npu_hw.o ./Application/npu/npu_hw.su ./Application/npu/npu_rt.cyclo ./Application/npu/npu_rt.d ./Application/npu/npu_rt.o ./Application/npu/npu_rt.su ./Application/npu/npu_selftest.cyclo ./Application/npu/npu_selftest.d ./Application/npu/npu_selftest.o ./Application/npu/npu_selftest.su
+	-$(RM) ./Application/npu/infer_task.cyclo ./Application/npu/infer_task.d ./Application/npu/infer_task.o ./Application/npu/infer_task.su ./Application/npu/npu_cache_port.cyclo ./Application/npu/npu_cache_port.d ./Application/npu/npu_cache_port.o ./Application/npu/npu_cache_port.su ./Application/npu/npu_hw.cyclo ./Application/npu/npu_hw.d ./Application/npu/npu_hw.o ./Application/npu/npu_hw.su ./Application/npu/npu_rt.cyclo ./Application/npu/npu_rt.d ./Application/npu/npu_rt.o ./Application/npu/npu_rt.su ./Application/npu/npu_selftest.cyclo ./Application/npu/npu_selftest.d ./Application/npu/npu_selftest.o ./Application/npu/npu_selftest.su
 
 .PHONY: clean-Application-2f-npu
 

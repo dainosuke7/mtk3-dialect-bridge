@@ -17,40 +17,20 @@
 #else
 #define NPU_HAVE_CLIPS		(0)
 #endif
-#include "../audio/audio_task.h"
-#include "../trace/trace.h"	// NOW(), trace_cyc_to_us(), trace_busy()
+#include "../trace/trace.h"	// NOW(), trace_cyc_to_us()
 
 /*
- * NPU タスクと、固定入力による推論の確認 (Phase 1 タスク6)
+ * 固定入力による推論の確認 (Phase 1 タスク6)。呼ぶのは推論タスク (infer_task.c) だけ
+ * (ll_aton はスレッドセーフでなく、推論はスタックを 1KB 以上使うため。infer_task.c の先頭)。
  *
- * ll_aton (npu_rt.c) を呼ぶのはこのタスクだけにする。
- *   - ll_aton はスレッドセーフでない (OSAL は BARE_METAL でロックが無い)
- *   - 推論はスタックを 1KB 以上使う。.su の値で、ll_sw_forward_softmax 360B、
- *     LL_ATON_End_EpochBlock_30 200B、ランタイムの各段 24〜40B に、ST のライブラリ
- *     (NetworkRuntime、.su 無し) の分が加わる。usermain は μT-Kernel の初期タスクで、
- *     スタックが 1KB (INITTASK_STKSZ、mtkernel/include/sys/inittask.h) しかなく、
- *     溢れても検出されない (USE_SPMON 無効)。npu_rt_init も同じ理由でこのタスクで呼ぶ
- *
- * 流れ:
- *   1. npu_rt_init()
- *   2. 自己テスト
+ *   npu_selftest():
  *      - 乱数入力で1回推論し、ONNX Runtime の期待値2通りと比べる (参考値。判定しない)
  *      - 同じ乱数入力で softmax 直前の int8 ロジットを比べる (参考値。フックの呼ばれ方も記録)
  *      - ESC-10 の実録音 30 本を推論し、1位を PC と比べる (これで PASS / FAIL)
- *   3. 乱数入力で10回連続。毎回の推論時間と、最初の推論の出力との差
- *   4. ここまで終わったら usermain に知らせる (usermain は音声を始める前にこれを待つ)
- *   5. NPU_PT_TEST が 1 なら、パススルーが立ち上がってから 960ms 間隔で10回推論し、
- *      音声の under / over / late が増えないかを見る (推論タスクの予行)
- *
- * 優先度 15 は音声 (task_pcm 5、task_audio 10) より低く、reporter (20) より高い。
- * POLLING の推論中はこのタスクが CPU を回し続けるので、推論のあいだ reporter と dump は動けない。
+ *      - 乱数入力で10回連続。毎回の推論時間と、最初の推論の出力との差
+ *   npu_selftest_run_fixed():
+ *      乱数入力で1回推論し、最初の推論の出力と比べる (パススルー中の推論の予行に使う)
  */
-
-/* 1: 手順5 (パススルー稼働中の推論) を行う。0 で無効 */
-#define NPU_PT_TEST		(1)
-
-#define NPU_TASK_PRI		(15)
-#define NPU_TASK_STKSZ		(8 * 1024)
 
 /*
  * 乱数入力の目安 (参考値。判定には使わない): 1位がこのクラスで、期待値2通りのどちらかとの差
@@ -59,12 +39,9 @@
 #define ST_EXPECT_TOP		"helicopter"	/* 期待値2通りのどちらでも1位 (aed_test_input.h) */
 #define ST_TOLERANCE		(0.05f)
 
-#define ST_REPEAT		(10)		/* 手順3 の回数 */
-#define PT_REPEAT		(10)		/* 手順5 の回数 */
-#define PT_INTERVAL_MS		(960)		/* 手順5 の推論の開始間隔 */
-#define PT_START_POLL		(300)		/* パススルーの立ち上がりを待つ上限 (x100ms) */
-#define PT_REPORT_POLL		(1200)		/* 手順5 の結果を出す前にトレースの終わりを待つ上限 (x100ms) */
-#define START_WAIT_MS		(30000)		/* usermain が手順1〜3 の終わりを待つ上限 */
+#define ST_REPEAT		(10)		/* 連続実行の回数 */
+
+_Static_assert(NPU_SELFTEST_TOL_X1E4 == 500, "keep in sync with ST_TOLERANCE");
 
 #define HEAD_BYTES		(16)		/* 失敗時に表示する入力バッファの先頭 */
 #define LINE_BYTES		(32)		/* D キャッシュのライン */
@@ -93,28 +70,7 @@
 _Static_assert(AED_TEST_INPUT_LEN == NPU_RT_IN_BYTES, "test input size");
 _Static_assert(AED_TEST_CLASSES == NPU_RT_OUT_CLASSES, "test output size");
 
-LOCAL void task_npu(INT stacd, void *exinf);
-LOCAL ID	tskid_npu;
-LOCAL T_CTSK	ctsk_npu = {
-	.itskpri	= NPU_TASK_PRI,
-	.stksz		= NPU_TASK_STKSZ,
-	.task		= task_npu,
-	.tskatr		= TA_HLNG | TA_RNG3,
-};
-
-/*
- * 手順1〜3 が終わったことを usermain に知らせる。tk_wup_tsk を使わないのは、usermain が
- * 待ちをタイムアウトした後に起床要求だけが残ると、usermain 最後の tk_slp_tsk(TMO_FEVR) が
- * すぐ戻って usermain が終わってしまうため
- */
-LOCAL ID	semid_done;
-LOCAL T_CSEM	csem_done = {
-	.sematr		= TA_TFIFO | TA_FIRST,
-	.isemcnt	= 0,
-	.maxsem		= 1,
-};
-
-LOCAL float	ref_out[NPU_RT_OUT_CLASSES];	/* 最初の推論の出力。手順3・5 の比較の基準 */
+LOCAL float	ref_out[NPU_RT_OUT_CLASSES];	/* 最初の推論の出力。連続実行と予行の比較の基準 */
 LOCAL BOOL	ref_valid = FALSE;
 
 LOCAL B		logit_q[NPU_RT_OUT_CLASSES];	/* epoch 30 の直前に取った int8 ロジット */
@@ -419,11 +375,10 @@ LOCAL BOOL clips_check(void)
 #endif	/* NPU_HAVE_CLIPS */
 
 /* ---------------------------------------------------------------- */
-/* 手順2・3                                                           */
+/* 自己テスト                                                          */
 /* ---------------------------------------------------------------- */
 
-/* 戻り値: 最初の推論が完了したら TRUE (出力が期待値と合わなくても)。そのときだけ手順5 を行う */
-LOCAL BOOL npu_selftest(void)
+EXPORT BOOL npu_selftest(void)
 {
 	float	out[NPU_RT_OUT_CLASSES];
 	B	before[HEAD_BYTES];
@@ -436,7 +391,7 @@ LOCAL BOOL npu_selftest(void)
 	tm_printf((UB*)"npu random-input test (reference only, not a pass/fail criterion): seed=%d\n",
 			AED_TEST_SEED);
 
-	/* 手順2: 乱数入力で1回推論して PC と比べる (参考値) */
+	/* 乱数入力で1回推論して PC と比べる (参考値) */
 	er = run_once(aed_test_input, out, &us, before, &in_diff);
 	tm_printf((UB*)"  input in RAM before inference: %u of %d bytes differ from aed_test_input\n",
 			in_diff, NPU_RT_IN_BYTES);
@@ -483,7 +438,7 @@ LOCAL BOOL npu_selftest(void)
 	tm_printf((UB*)"npu selftest NOT JUDGED\n");
 #endif
 
-	/* 手順3: 同じ入力で連続実行 */
+	/* 同じ入力で連続実行 */
 	tm_printf((UB*)"npu repeat x%d (same input):\n", ST_REPEAT);
 	t_min = 0xFFFFFFFFU;
 	t_max = 0;
@@ -513,118 +468,23 @@ LOCAL BOOL npu_selftest(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* 手順5: パススルー稼働中の推論                                        */
+/* パススルー中の推論の予行 (推論タスクから窓ごとに呼ぶ)                */
 /* ---------------------------------------------------------------- */
 
-#if NPU_PT_TEST
-LOCAL void pt_test(void)
+EXPORT ER npu_selftest_run_fixed(UW *us, INT *diff_x1e4, BOOL *same)
 {
 	float	out[NPU_RT_OUT_CLASSES];
-	UW	us[PT_REPEAT];
-	ER	ers[PT_REPEAT];
-	INT	dif[PT_REPEAT];		/* 最初の推論の出力との差の最大値 (x1e-4) */
-	BOOL	same[PT_REPEAT];
-	UW	u0, o0, l0, u1, o1, l1, t0, el_ms, t_min, t_max, t_sum, n_ok;
-	INT	i, k;
-	BOOL	pass;
-
-	for(i = 0; i < PT_START_POLL && !audio_passthrough_active(); i++) tk_dly_tsk(100);
-	if(!audio_passthrough_active()) {
-		tm_printf((UB*)"npu pt test: SKIP (passthrough did not start)\n");
-		return;
-	}
-
-	audio_pt_counts(&u0, &o0, &l0);
-	for(k = 0; k < PT_REPEAT; k++) {
-		t0      = NOW();
-		ers[k]  = run_once(aed_test_input, out, &us[k], NULL, NULL);
-		dif[k]  = (ers[k] == E_OK) ? x10k(max_abs_diff(out, ref_out)) : -1;
-		same[k] = (ers[k] == E_OK) && (memcmp(out, ref_out, sizeof(out)) == 0);
-		if(k == PT_REPEAT - 1) break;
-		el_ms = trace_cyc_to_us((UW)(NOW() - t0)) / 1000U;
-		tk_dly_tsk((el_ms < PT_INTERVAL_MS) ? (PT_INTERVAL_MS - el_ms) : 1);
-	}
-	audio_pt_counts(&u1, &o1, &l1);
-
-	/*
-	 * usermain がパススルーの立ち上がりと同時に10秒のトレースを始め、その後 CSV をダンプする。
-	 * ダンプ中の出力は CSV に混ざるので、記録とダンプが終わってからまとめて出す
-	 * (推論の前後は TRACE の EV_INF_START / EV_INF_END として CSV に残っている)
-	 */
-	for(i = 0; i < PT_REPORT_POLL && trace_busy(); i++) tk_dly_tsk(100);
-
-	tm_printf((UB*)"npu pt test: %d runs every %d ms during passthrough (task pri %d)\n",
-			PT_REPEAT, PT_INTERVAL_MS, NPU_TASK_PRI);
-	t_min = 0xFFFFFFFFU;
-	t_max = 0;
-	t_sum = 0;
-	n_ok  = 0;
-	for(k = 0; k < PT_REPEAT; k++) {
-		if(ers[k] != E_OK) {
-			tm_printf((UB*)"  [%2d] er=%d after %u us\n", k + 1, ers[k], us[k]);
-			continue;
-		}
-		tm_printf((UB*)"  [%2d] %6u us, max diff vs first = %d x1e-4%s\n", k + 1, us[k], dif[k],
-				same[k] ? " (bit-identical)" : "");
-		if(us[k] < t_min) t_min = us[k];
-		if(us[k] > t_max) t_max = us[k];
-		t_sum += us[k];
-		n_ok++;
-	}
-	if(n_ok > 0) {
-		tm_printf((UB*)"  inference time: min=%u mean=%u max=%u us (%u of %d runs OK)\n",
-				t_min, t_sum / n_ok, t_max, n_ok, PT_REPEAT);
-	}
-	tm_printf((UB*)"  audio before: under=%u over=%u late=%u / after: under=%u over=%u late=%u\n",
-			u0, o0, l0, u1, o1, l1);
-
-	pass = (n_ok == PT_REPEAT) && (u1 == u0) && (o1 == o0) && (l1 == l0);
-	for(k = 0; k < PT_REPEAT; k++) {
-		if(ers[k] == E_OK && dif[k] > x10k(ST_TOLERANCE)) pass = FALSE;
-	}
-	tm_printf((UB*)"npu pt test %s (all runs OK, output within %d x1e-4 of first, no new under/over/late)\n",
-			pass ? "PASS" : "FAIL", x10k(ST_TOLERANCE));
-}
-#endif	/* NPU_PT_TEST */
-
-/* ---------------------------------------------------------------- */
-
-LOCAL void task_npu(INT stacd, void *exinf)
-{
-	ER	er;
-	BOOL	ran = FALSE;
-
-	er = npu_rt_init();
-	tm_printf((UB*)"npu_rt_init: ret=%d\n", er);
-	if(er == E_OK) ran = npu_selftest();
-
-	(void)tk_sig_sem(semid_done, 1);
-
-#if NPU_PT_TEST
-	if(ran) {
-		pt_test();
-	} else {
-		tm_printf((UB*)"npu pt test: SKIP (selftest inference did not complete)\n");
-	}
-#else
-	(void)ran;
-#endif
-
-	tk_ext_tsk();
-}
-
-EXPORT ER npu_task_start(void)
-{
 	ER	er;
 
-	semid_done = tk_cre_sem(&csem_done);
-	if(semid_done < E_OK) return semid_done;
+	*us        = 0;
+	*diff_x1e4 = -1;
+	*same      = FALSE;
+	if(!ref_valid) return E_OBJ;
 
-	tskid_npu = tk_cre_tsk(&ctsk_npu);
-	if(tskid_npu < E_OK) return tskid_npu;
+	er = run_once(aed_test_input, out, us, NULL, NULL);
+	if(er != E_OK) return er;
 
-	er = tk_sta_tsk(tskid_npu, 0);
-	if(er < E_OK) return er;
-
-	return tk_wai_sem(semid_done, 1, START_WAIT_MS);
+	*diff_x1e4 = x10k(max_abs_diff(out, ref_out));
+	*same      = (memcmp(out, ref_out, sizeof(out)) == 0);
+	return E_OK;
 }

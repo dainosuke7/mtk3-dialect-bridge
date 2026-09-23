@@ -7,6 +7,7 @@
 #include "sai_io.h"
 #include "mdf_io.h"
 #include "pcm_fifo.h"
+#include "tap_ring.h"
 #include "audio_task.h"
 #include "../trace/trace.h"
 
@@ -221,6 +222,12 @@ LOCAL void mic_process_half(UINT half)
 			trace_rate_note_overrun();
 		}
 	}
+
+	/* 推論用のタップにも同じ int16 を書く (変換は上の1回だけ)。待たない。
+	 * パススルーの有無にかかわらず、マイクが動いている間は書く */
+	TRACE(EV_TAP_WR_START, (UB)mdf_cb_total);
+	tap_ring_write(mic_mono, MDF_IN_HALF_SAMPLES);
+	TRACE(EV_TAP_WR_END, (UB)mdf_cb_total);
 
 	trace_rate_add_in(MDF_IN_HALF_SAMPLES);
 }
