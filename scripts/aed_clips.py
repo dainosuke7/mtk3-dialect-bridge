@@ -15,8 +15,13 @@ Phase 1 タスク6: NPU の推論が正しいかを、実録音 30 本の1位ク
     <ESC-50>: github.com/karolpiczak/ESC-50 のリポジトリ (meta/esc50.csv と下の 30 本の wav)
 
 出力: mtk3bsp2_stm32n657/Appli/Application/npu/aed_test_clips.h
-    ESC-50 由来のデータを含むのでリポジトリには入れない (.gitignore 済み)。
-    無ければボード側はこの確認を飛ばす (npu_selftest.c の __has_include)。
+      30 本の int8 入力と PC の1位 (NPU の推論の判定用。npu_selftest.c の clips_check)。
+      ROM が足りないときは npu_selftest.c の AED_USE_TEST_CLIPS を 0 にしてビルドから外す
+    mtk3bsp2_stm32n657/Appli/Application/aed/aed_ref_clips.h
+      上のうち2本ぶんの生 PCM も入れたもの (ボードの前処理を突き合わせる用。タスク8。
+      infer_task.c の preproc_test)
+    どちらも ESC-50 由来のデータを含むのでリポジトリには入れない (.gitignore 済み)。
+    無ければボード側はその確認を飛ばす (__has_include)。
 
 前処理 (ST の GettingStarted-Audio と同じ。確認箇所は各関数のコメント):
     int16 16kHz の先頭 15600 サンプル → 96 列 (ホップ 160、窓 400)
@@ -80,9 +85,22 @@ CLIPS = {
 }
 LEVEL_MARGIN_DB = 6.0
 
+# ---------------------------------------------------------------------------
+# ボードの前処理を突き合わせる2本 (タスク8)。生 PCM (15600 x int16 = 30.5KB) も
+# ヘッダに入れるので本数を絞る。
+# 選び方: 上の CLIPS のうち PC の1位が正解と一致して最適化あり・なしで同じ、かつ確率が
+# REF_MIN_PROB 以上のものから、音量と時間構造が対照的な2本
+#   5-203128-A-0.wav  (dog,        -16dBFS) 大きい音・短い立ち上がりが並ぶ
+#   5-201194-A-38.wav (clock_tick, -38dBFS) 小さい音・ほぼ無音の中に点在する (量子化の下限側を通る)
+# 条件はこのスクリプトでも毎回確かめ、外れたら警告する
+REF_CLIPS = ["5-203128-A-0.wav", "5-201194-A-38.wav"]
+REF_MIN_PROB = 0.999
+
 REPO = Path(__file__).resolve().parent.parent
 OUT_H = REPO / "mtk3bsp2_stm32n657" / "Appli" / "Application" / "npu" / "aed_test_clips.h"
 SELFTEST_C = OUT_H.parent / "npu_selftest.c"
+INFER_TASK_C = OUT_H.parent / "infer_task.c"
+REF_OUT_H = OUT_H.parent.parent / "aed" / "aed_ref_clips.h"
 MODEL_REL = Path("Projects/X-CUBE-AI/models/yamnet_1024_64x96_tl_qdq_int8.onnx")
 CONFIG_REL = Path("Projects/Dpu/ai_model_config.h.aed")
 TABLES_REL = Path("Projects/Dpu/user_mel_tables.c.aed")
@@ -251,12 +269,107 @@ def sessions(model_bytes: bytes) -> dict[str, ort.InferenceSession]:
 
 # ---------------------------------------------------------------------------
 
+def c_rows(values, per_line: int, indent: str = "\t\t") -> str:
+    """整数の配列を1行 per_line 個で並べる (末尾のカンマは C では問題ない)"""
+    return "\n".join(indent + ",".join(str(int(v)) for v in values[i:i + per_line]) + ","
+                     for i in range(0, len(values), per_line))
+
+
+def write_ref_header(clips: list[dict], sha256: str, scale: np.float32, zp: int, tables_note: str) -> list[dict]:
+    """前処理をボードで突き合わせる2本 (生 PCM + PC の int8 テンソル + PC の1位) を出す。"""
+    by_file = {c["file"]: c for c in clips}
+    ref = []
+    for fn in REF_CLIPS:
+        c = by_file.get(fn)
+        if c is None:
+            sys.exit(f"REF_CLIPS の {fn} が CLIPS に無い")
+        if c["top_ort"] != c["truth"] or c["top_noopt"] != c["truth"]:
+            print(f"(!) {fn}: PC の1位が正解と違う (前処理の突き合わせには向かない)")
+        elif min(c["p_ort"], c["p_noopt"]) < REF_MIN_PROB:
+            print(f"(!) {fn}: PC の確率が {min(c['p_ort'], c['p_noopt']):.3f} < {REF_MIN_PROB}"
+                  f" (1位が入れ替わりやすい)")
+        ref.append(c)
+
+    arr = lambda key, fmt: ", ".join(fmt(c[key]) for c in ref)
+    pcm = "\n".join(f"\t{{ /* {c['file']} ({c['label']}) */\n" + c_rows(c["pcm"], 16) + "\n\t}," for c in ref)
+    ten = "\n".join(f"\t{{ /* {c['file']} ({c['label']}) */\n" + c_rows(c["q"].reshape(-1), 32) + "\n\t}," for c in ref)
+    text = f"""/* 自動生成: scripts/aed_clips.py。手で編集しない。ESC-50 由来のデータを含むのでコミットしない */
+#ifndef AED_REF_CLIPS_H
+#define AED_REF_CLIPS_H
+
+#include <stdint.h>
+
+/*
+ * ボードの前処理 (Application/aed/preproc.c) を PC と突き合わせるための実録音 {len(ref)} 本
+ * (Phase 1 タスク8。使うのは infer_task.c の preproc_test)
+ *   音声:   ESC-50 (K. J. Piczak, github.com/karolpiczak/ESC-50) の ESC-10 サブセット、fold 5。
+ *           ESC-10 は CC BY 3.0、ESC-50 全体は CC BY-NC 3.0 (各クリップの出典は ESC-50 の LICENSE)
+ *   pcm:    16kHz int16 に直した先頭 {N_SAMPLES} サンプル (ボードの前処理に入れる生の音)
+ *   tensor: その pcm を PC が log-mel にした int8 (scripts/aed_clips.py の logmel_q8)。
+ *           ボードの前処理の結果と 1 バイトずつ比べる。並びは [メル 0..63][列 0..95]
+ *           {tables_note}
+ *   量子化: scale={float(scale):.9g}, zero_point={zp} (Application/aed/preproc.h の値と一致すること)
+ *   1位:    上の tensor を入れたときの ONNX Runtime {ort.__version__} (CPU) の1位と確率。
+ *           ort = 既定の最適化、noopt = 最適化なし
+ *   モデル: yamnet_1024_64x96_tl_qdq_int8.onnx sha256 {sha256}
+ * static な配列なので、include するのは1つの .c だけにする。
+ */
+
+#define AED_REF_CLIP_COUNT	({len(ref)})
+#define AED_REF_SAMPLES		({N_SAMPLES})
+#define AED_REF_TENSOR_LEN	({N_MELS * N_COLS})
+#define AED_REF_CLASSES		({len(CLASSES)})
+#define AED_REF_SCALE		({float(scale):.9g}f)
+#define AED_REF_ZP		({zp})
+
+/* 前処理に入れる生の音 (16kHz int16) */
+static const int16_t aed_ref_pcm[AED_REF_CLIP_COUNT][AED_REF_SAMPLES] = {{
+{pcm}
+}};
+
+/* PC が同じ pcm から作った int8 テンソル (ボードの前処理の答え合わせ) */
+static const int8_t aed_ref_tensor[AED_REF_CLIP_COUNT][AED_REF_TENSOR_LEN] __attribute__((aligned(32))) = {{
+{ten}
+}};
+
+static const char *const aed_ref_file[AED_REF_CLIP_COUNT] = {{
+	{arr("file", lambda v: f'"{v}"')}
+}};
+
+/* 正解のクラス番号 (ESC-50 のラベル) */
+static const uint8_t aed_ref_truth[AED_REF_CLIP_COUNT] = {{
+	{arr("truth", str)}
+}};
+
+/* 上の tensor での PC の1位のクラス番号と、その確率 */
+static const uint8_t aed_ref_top_ort[AED_REF_CLIP_COUNT] = {{
+	{arr("top_ort", str)}
+}};
+static const uint8_t aed_ref_top_noopt[AED_REF_CLIP_COUNT] = {{
+	{arr("top_noopt", str)}
+}};
+static const float aed_ref_prob_ort[AED_REF_CLIP_COUNT] = {{
+	{arr("p_ort", lambda v: f"{v:.6f}f")}
+}};
+static const float aed_ref_prob_noopt[AED_REF_CLIP_COUNT] = {{
+	{arr("p_noopt", lambda v: f"{v:.6f}f")}
+}};
+
+/* クラス名 (並びは aed_test_input.h の aed_test_class_names と同じ) */
+static const char *const aed_ref_class_names[AED_REF_CLASSES] = {{
+	{", ".join(f'"{n}"' for n in CLASSES)}
+}};
+
+#endif	/* AED_REF_CLIPS_H */
+"""
+    REF_OUT_H.parent.mkdir(parents=True, exist_ok=True)
+    REF_OUT_H.write_text(text, encoding="utf-8", newline="\n")
+    return ref
+
+
 def write_header(clips: list[dict], sha256: str, scale: np.float32, zp: int, tables_note: str) -> None:
-    lines = []
-    for c in clips:
-        flat = c["q"].reshape(-1)
-        rows = ["\t\t" + ",".join(f"{int(v)}" for v in flat[i:i + 32]) + "," for i in range(0, flat.size, 32)]
-        lines.append(f"\t{{ /* {c['file']} ({c['label']}) */\n" + "\n".join(rows) + "\n\t},")
+    lines = [f"\t{{ /* {c['file']} ({c['label']}) */\n" + c_rows(c["q"].reshape(-1), 32) + "\n\t},"
+             for c in clips]
     arr = lambda key, fmt: ", ".join(fmt(c[key]) for c in clips)
     text = f"""/* 自動生成: scripts/aed_clips.py。手で編集しない。ESC-50 由来のデータを含むのでコミットしない */
 #ifndef NPU_AED_TEST_CLIPS_H
@@ -350,7 +463,7 @@ def main() -> None:
             warn = " (!) quiet start" if lvl < lvl_all - LEVEL_MARGIN_DB else ""
             q = logmel_q8(x, win, fb, inv_scale, zp)
             xin = ((q.astype(np.float32) - np.float32(zp)) * scale).reshape(1, N_MELS, N_COLS, 1)
-            c = {"file": fn, "label": label, "truth": CLASSES.index(label), "q": q}
+            c = {"file": fn, "label": label, "truth": CLASSES.index(label), "q": q, "pcm": x}
             for mode, s in sess.items():
                 y = s.run(None, {name: xin})[0].reshape(-1)
                 c[f"top_{mode}"] = int(y.argmax())
@@ -367,10 +480,14 @@ def main() -> None:
     print(f"PC top-1 == truth: ort {acc_ort}/{n}, noopt {acc_noopt}/{n}; ort == noopt: {agree}/{n}")
 
     write_header(clips, sha256, scale, zp, tables_note)
-    # npu_selftest.c はヘッダが無いと __has_include で読まない。ヘッダ無しでビルドした後だと
+    ref = write_ref_header(clips, sha256, scale, zp, tables_note)
+    # ボード側はヘッダが無いと __has_include で読まない。ヘッダ無しでビルドした後だと
     # 依存関係 (.d) にヘッダが載っておらず make が作り直さないので、.c の更新時刻を進める
     SELFTEST_C.touch()
+    INFER_TASK_C.touch()
     print(f"wrote {OUT_H.relative_to(REPO)} ({n} x {N_MELS * N_COLS} B), touched {SELFTEST_C.name}")
+    print(f"wrote {REF_OUT_H.relative_to(REPO)} ({len(ref)} x ({N_SAMPLES} x int16 + {N_MELS * N_COLS} B): "
+          f"{', '.join(c['file'] for c in ref)}), touched {INFER_TASK_C.name}")
 
 
 if __name__ == "__main__":

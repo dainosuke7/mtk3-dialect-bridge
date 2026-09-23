@@ -5,9 +5,30 @@
 #include "infer_task.h"
 #include "npu_rt.h"
 #include "npu_selftest.h"
+#include "../aed/preproc.h"
 #include "../audio/tap_ring.h"
 #include "../audio/audio_task.h"
 #include "../trace/trace.h"	// trace_muted(), trace_busy(), trace_cyc_per_us()
+
+/*
+ * 1: 起動後のパススルー中に、ボードの前処理 (Application/aed/preproc.c) の結果を PC と
+ * 突き合わせる (Phase 1 タスク8)。0 で無効。
+ * 実録音2本の生 PCM と PC のテンソルでコード領域が 74,688B 増えるので、
+ * npu_selftest.c の AED_USE_TEST_CLIPS (30 本、184,320B) とは同時に載せられない
+ */
+#define PREPROC_TEST		(1)
+
+/*
+ * 前処理を PC と突き合わせるための実録音2本 (生 PCM + PC の int8 テンソル + PC の1位。
+ * scripts/aed_clips.py の生成物)。ESC-50 由来のデータなのでコミットしない (.gitignore)。
+ * 無ければ前処理セルフテストだけを飛ばしてビルドは通す
+ */
+#if PREPROC_TEST && __has_include("../aed/aed_ref_clips.h")
+#include "../aed/aed_ref_clips.h"
+#define HAVE_REF_CLIPS		(1)
+#else
+#define HAVE_REF_CLIPS		(0)
+#endif
 
 /*
  * 推論タスク (Phase 1 タスク7 で骨組み。タスク9 で前処理と推論を載せる)
@@ -21,13 +42,18 @@
  *     溢れても検出されない (USE_SPMON 無効)。npu_rt_init も同じ理由でこのタスクで呼ぶ
  *
  * 流れ:
- *   1. npu_rt_init() と自己テスト (npu_selftest.c)。終わったら usermain に知らせる
+ *   1. preproc_init() で前処理の表を作り、npu_rt_init() と自己テスト (npu_selftest.c)。
+ *      終わったら usermain に知らせる
  *      (usermain は推論時間を音声の負荷なしで測るため、音声を始める前にこれを待つ)
  *   2. タップリングから窓を取り出す。書き手 (task_pcm) が窓をそろえたときにセマフォで起きる
  *      - 窓を静的バッファ win_buf へコピー
  *      - 音量 (RMS・ピーク) と、前の窓の末尾 240 サンプルとの一致を確かめて1行表示
  *      - タスク9: ここで win_buf を log-mel にして推論する
- *   3. NPU_PT_TEST が 1 なら、パススルー稼働中の最初の 10 窓で乱数入力の推論を1回ずつ行い、
+ *   3. PREPROC_TEST が 1 なら、パススルー稼働中に1回だけ前処理セルフテストを行う。
+ *      実録音2本 (aed_ref_clips.h の生 PCM) をボードで log-mel にして、PC が同じ音から
+ *      作った int8 テンソルと 6144 要素すべてを比べ、そのテンソルで推論して1位を PC と並べる。
+ *      前処理の差と NPU の差を切り分けるため、PC のテンソルでの推論も行う
+ *   4. NPU_PT_TEST が 1 なら、パススルー稼働中の最初の 10 窓で乱数入力の推論を1回ずつ行い、
  *      前後で音声の under / over / late が増えないかを見る (推論を載せたときの予行)。
  *      タスク6 の npu pt test (同じ優先度の別ループで 960ms ごとに推論) をここへ統合した。
  *      間隔はタップリングの窓 (15360 サンプル = 約 960ms) で決まる
@@ -230,6 +256,209 @@ LOCAL void pt_step(BOOL npu_ok)
 #endif	/* NPU_PT_TEST */
 
 /* ---------------------------------------------------------------- */
+/* 前処理セルフテスト (タスク8)                                        */
+/* ---------------------------------------------------------------- */
+
+#if HAVE_REF_CLIPS
+
+_Static_assert(AED_REF_SAMPLES == AED_PREPROC_SAMPLES, "ref clip length");
+_Static_assert(AED_REF_TENSOR_LEN == AED_PREPROC_OUT_LEN, "ref tensor size");
+_Static_assert(AED_REF_TENSOR_LEN == NPU_RT_IN_BYTES, "npu input size");
+_Static_assert(AED_REF_CLASSES == NPU_RT_OUT_CLASSES, "class count");
+_Static_assert(AED_REF_ZP == AED_PREPROC_ZP, "quantization zero point");
+
+/* 差が 1 を超える要素があれば前処理の移植が合っていない (float32 と float64 の差では出ない) */
+#define PP_MAX_ABS_DIFF		(1)
+
+LOCAL B		pp_tensor[AED_PREPROC_OUT_LEN] __attribute__((aligned(32)));	/* 前処理の結果 */
+LOCAL BOOL	pp_done = FALSE;
+
+/* tm_printf は浮動小数点を出せないので、1万倍して丸めた整数で出す (npu_selftest.c と同じ) */
+LOCAL INT x10k(float v)
+{
+	return (INT)(v * 10000.0f + ((v >= 0.0f) ? 0.5f : -0.5f));
+}
+
+LOCAL INT argmax(const float *v)
+{
+	INT	i, top = 0;
+
+	for(i = 1; i < NPU_RT_OUT_CLASSES; i++) {
+		if(v[i] > v[top]) top = i;
+	}
+	return top;
+}
+
+/*
+ * ボードのテンソルと PC のテンソルを1バイトずつ比べる。
+ * *n_same 一致数 / *n_diff 不一致数 / *max_abs 最大絶対差 / *n_big 差が 1 を超えた要素数 /
+ * *at 最大絶対差だった要素の番号 (無ければ -1)
+ */
+LOCAL void pp_compare(const B *got, const B *ref, UW *n_same, UW *n_diff,
+			INT *max_abs, UW *n_big, INT *at)
+{
+	INT	i, d;
+
+	*n_same  = 0;
+	*n_diff  = 0;
+	*max_abs = 0;
+	*n_big   = 0;
+	*at      = -1;
+	for(i = 0; i < AED_PREPROC_OUT_LEN; i++) {
+		d = (INT)got[i] - (INT)ref[i];
+		if(d == 0) {
+			(*n_same)++;
+			continue;
+		}
+		(*n_diff)++;
+		if(d < 0) d = -d;
+		if(d > *max_abs) {
+			*max_abs = d;
+			*at      = i;
+		}
+		if(d > PP_MAX_ABS_DIFF) (*n_big)++;
+	}
+}
+
+/* クリップ1本。npu_ok が FALSE なら前処理と突き合わせだけ行う */
+LOCAL void pp_one(INT k, BOOL npu_ok, UW *n_same, UW *n_diff, INT *max_abs, UW *n_big,
+			BOOL *top_ok, BOOL *ref_top_ok)
+{
+	float	out[NPU_RT_OUT_CLASSES];
+	UW	pp_us, us;
+	INT	at, top, t_ort, t_flt;
+	ER	er;
+
+	t_ort = (INT)aed_ref_top_ort[k];
+	t_flt = (INT)aed_ref_top_noopt[k];
+
+	tm_printf((UB*)"  [%d] %s (%s)\n", k, aed_ref_file[k], aed_ref_class_names[aed_ref_truth[k]]);
+
+	/* 生 PCM からボードで log-mel を作る */
+	pp_us = preproc_run(aed_ref_pcm[k], pp_tensor);
+	tm_printf((UB*)"      preproc %u us\n", pp_us);
+
+	/* PC のテンソルと1バイトずつ比べる */
+	pp_compare(pp_tensor, aed_ref_tensor[k], n_same, n_diff, max_abs, n_big, &at);
+	tm_printf((UB*)"      int8 vs PC: same %u diff %u of %d, max |d| %d, |d|>%d: %u\n",
+			*n_same, *n_diff, AED_PREPROC_OUT_LEN, *max_abs, PP_MAX_ABS_DIFF, *n_big);
+	if(at >= 0) {
+		/* 並びは out[col + 96 * mel] (preproc.h)。どのメル・列でずれたか */
+		tm_printf((UB*)"      worst at mel %d col %d: board %d, pc %d\n",
+				at / AED_PREPROC_COLS, at % AED_PREPROC_COLS,
+				(INT)pp_tensor[at], (INT)aed_ref_tensor[k][at]);
+	}
+
+	*top_ok     = FALSE;
+	*ref_top_ok = FALSE;
+	if(!npu_ok) {
+		tm_printf((UB*)"      inference skipped (NPU not ready)\n");
+		return;
+	}
+
+	/* ボードのテンソルで推論 */
+	er = npu_selftest_infer(pp_tensor, out, &us);
+	if(er != E_OK) {
+		tm_printf((UB*)"      board tensor: inference failed er=%d after %u us\n", er, us);
+	} else {
+		top     = argmax(out);
+		*top_ok = (top == t_ort) || (top == t_flt);
+		tm_printf((UB*)"      board tensor -> top1 %d %s p=%d x1e-4 (%u us) %s\n",
+				top, aed_ref_class_names[top], x10k(out[top]), us,
+				*top_ok ? "ok" : "MISMATCH");
+	}
+
+	/* PC のテンソルで推論 (前処理の差と NPU の差を切り分ける) */
+	er = npu_selftest_infer(aed_ref_tensor[k], out, &us);
+	if(er != E_OK) {
+		tm_printf((UB*)"      pc tensor: inference failed er=%d after %u us\n", er, us);
+	} else {
+		top         = argmax(out);
+		*ref_top_ok = (top == t_ort) || (top == t_flt);
+		tm_printf((UB*)"      pc tensor    -> top1 %d %s p=%d x1e-4 (%u us) %s\n",
+				top, aed_ref_class_names[top], x10k(out[top]), us,
+				*ref_top_ok ? "ok" : "MISMATCH");
+	}
+
+	tm_printf((UB*)"      PC reference: ort top1 %d %s p=%d / noopt top1 %d %s p=%d (x1e-4)\n",
+			t_ort, aed_ref_class_names[t_ort], x10k(aed_ref_prob_ort[k]),
+			t_flt, aed_ref_class_names[t_flt], x10k(aed_ref_prob_noopt[k]));
+}
+
+LOCAL void pp_report(BOOL npu_ok)
+{
+	UW	n_same, n_diff, n_big, s_same = 0, s_diff = 0, s_big = 0;
+	UW	u0, o0, l0, u1, o1, l1;
+	INT	k, max_abs, s_max = 0;
+	BOOL	top_ok, ref_top_ok, pass = TRUE;
+	INT	n_top = 0, n_ref_top = 0;
+
+	audio_pt_counts(&u0, &o0, &l0);
+
+	tm_printf((UB*)"preproc test: %d clips, board log-mel (Application/aed/preproc.c) vs PC"
+			" (scripts/aed_clips.py)\n", AED_REF_CLIP_COUNT);
+	tm_printf((UB*)"  %d x int16 -> int8 1x%dx%d (%d B), zp=%d, mel LUT %u coefs (expected %d)\n",
+			AED_PREPROC_SAMPLES, AED_PREPROC_MELS, AED_PREPROC_COLS, AED_PREPROC_OUT_LEN,
+			AED_PREPROC_ZP, preproc_mel_coefs(), AED_PREPROC_MEL_COEFS);
+	if(AED_REF_SCALE != AED_PREPROC_SCALE) {
+		tm_printf((UB*)"  [WARN] quantization scale differs from the PC header:"
+				" check AED_PREPROC_SCALE against AED_REF_SCALE\n");
+		pass = FALSE;
+	}
+	if(preproc_mel_coefs() != AED_PREPROC_MEL_COEFS) {
+		tm_printf((UB*)"  [WARN] mel LUT size differs from the PC / ST tables\n");
+		pass = FALSE;
+	}
+
+	for(k = 0; k < AED_REF_CLIP_COUNT; k++) {
+		pp_one(k, npu_ok, &n_same, &n_diff, &max_abs, &n_big, &top_ok, &ref_top_ok);
+		s_same += n_same;
+		s_diff += n_diff;
+		s_big  += n_big;
+		if(max_abs > s_max) s_max = max_abs;
+		if(top_ok) n_top++;
+		if(ref_top_ok) n_ref_top++;
+	}
+
+	tm_printf((UB*)"  totals: same %u diff %u of %d, max |d| %d, |d|>%d: %u\n",
+			s_same, s_diff, AED_PREPROC_OUT_LEN * AED_REF_CLIP_COUNT, s_max,
+			PP_MAX_ABS_DIFF, s_big);
+	tm_printf((UB*)"  top1 == PC: board tensor %d/%d, pc tensor %d/%d\n",
+			n_top, AED_REF_CLIP_COUNT, n_ref_top, AED_REF_CLIP_COUNT);
+
+	if(s_big > 0) pass = FALSE;
+	if(npu_ok && n_top != AED_REF_CLIP_COUNT) pass = FALSE;
+	tm_printf((UB*)"preproc test %s (no |d| > %d, and top1 from the board tensor matches PC%s)\n",
+			pass ? "PASS" : "FAIL", PP_MAX_ABS_DIFF,
+			npu_ok ? "" : " [inference not run]");
+
+	audio_pt_counts(&u1, &o1, &l1);
+	tm_printf((UB*)"  audio before: under=%u over=%u late=%u / after: under=%u over=%u late=%u\n",
+			u0, o0, l0, u1, o1, l1);
+}
+
+/* 窓ごとに1回呼ぶ。パススルーが動いていて、トレースと予行が済んでから1回だけ行う */
+LOCAL void pp_step(BOOL npu_ok)
+{
+	if(pp_done) return;
+	if(!audio_passthrough_active()) return;
+	if(trace_busy()) return;		/* 記録中・ダンプ中の出力は CSV に混ざる */
+#if NPU_PT_TEST
+	/*
+	 * 予行の推論時間に前処理の負荷を混ぜないよう、予行の報告を待つ。
+	 * NPU が使えないときは予行が始まらない (pt_reported が立たない) ので待たない
+	 * (前処理と突き合わせだけは NPU 無しでもできる)
+	 */
+	if(npu_ok && !pt_reported) return;
+#endif
+
+	pp_report(npu_ok);
+	pp_done = TRUE;
+}
+
+#endif	/* HAVE_REF_CLIPS */
+
+/* ---------------------------------------------------------------- */
 
 LOCAL void task_infer(INT stacd, void *exinf)
 {
@@ -241,6 +470,16 @@ LOCAL void task_infer(INT stacd, void *exinf)
 	const char	*seam;
 	BOOL		npu_ok = FALSE, idle = FALSE;
 	ER		er;
+
+	/* 前処理の表 (窓・ツイドル・メルフィルタ)。double を使うのでこのタスクで作る */
+	er = preproc_init();
+	tm_printf((UB*)"preproc_init: ret=%d (mel LUT %u coefs, expected %d)\n",
+			er, preproc_mel_coefs(), AED_PREPROC_MEL_COEFS);
+#if !PREPROC_TEST
+	tm_printf((UB*)"preproc test: SKIP (PREPROC_TEST=0)\n");
+#elif !HAVE_REF_CLIPS
+	tm_printf((UB*)"preproc test: SKIP (aed_ref_clips.h not found: run scripts/aed_clips.py)\n");
+#endif
 
 	er = npu_rt_init();
 	tm_printf((UB*)"npu_rt_init: ret=%d\n", er);
@@ -276,7 +515,11 @@ LOCAL void task_infer(INT stacd, void *exinf)
 
 #if NPU_PT_TEST
 		pt_step(npu_ok);
-#else
+#endif
+#if HAVE_REF_CLIPS
+		pp_step(npu_ok);
+#endif
+#if !NPU_PT_TEST && !HAVE_REF_CLIPS
 		(void)npu_ok;
 #endif
 

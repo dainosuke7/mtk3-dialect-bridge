@@ -28,7 +28,7 @@ COM ポートは1プロセスしか開けない。他のターミナルを閉じ
 CubeProgrammer は CubeIDE 同梱: C:\ST\STM32CubeIDE_*\STM32CubeIDE\plugins\*cubeprogrammer*\tools\bin 重み hex はリポジトリに入れない（ST ライセンス・容量）。取得元は README に記載
 
 NPU 比較用の参照値（PC）: uv run scripts/aed_ref.py <GettingStarted-Audio>/Projects/X-CUBE-AI/models/yamnet_1024_64x96_tl_qdq_int8.onnx → Application/npu/aed_test_input.h を上書き生成（seed 固定なので同じ内容になる。softmax 後の値と、softmax 直前の int8 ロジット・scale・zero_point）
-実録音の判定用（PC）: uv run scripts/aed_clips.py <GettingStarted-Audio> <ESC-50> → Application/npu/aed_test_clips.h（コミットしない）。ESC-50 は git clone github.com/karolpiczak/ESC-50（使うのは meta/ と audio/ の 30 本。ファイル名はスクリプトに固定）
+実録音の判定用（PC）: uv run scripts/aed_clips.py <GettingStarted-Audio> <ESC-50> → Application/npu/aed_test_clips.h（30 本の int8 入力）と Application/aed/aed_ref_clips.h（そのうち2本の生 PCM も入れた前処理の突き合わせ用）。どちらもコミットしない。ESC-50 は git clone github.com/karolpiczak/ESC-50（使うのは meta/ と audio/ の 30 本。ファイル名はスクリプトに固定）
 
 ハード
 STM32N6570-DK / Cortex-M55 600MHz + Neural-ART NPU
@@ -72,7 +72,7 @@ PCM リング（pcm_fifo）は SPSC。消費者を増やせない。推論用は
 フォルト可視化（Application/fault/）: 起動時にベクタテーブルを RAM にコピーし、未実装 IRQ 180本とフォルト例外5本を差し替え。 CFSR/BFAR/スタック上の PC を UART 直叩きで出してから停止。デバッガ接続時は __BKPT で止まるので F8 で続行
 FAULT_TEST（fault.h）: 0=無効 / 1=BusFault / 2=ゼロ除算 / 3=未実装IRQ / 4=STKOF。コミット時は必ず 0
 トレース（Application/trace/）: TRACE(id,arg) で (CYCCNT, id, arg) を記録。trace_start(ms) で区間記録し、終了後に CSV ダンプ。 ダンプ中は trace_muted() で他の出力を抑制
-テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）と NPU_PT_TEST（infer_task.c、パススルー中にタップリングの窓ごと＝約 960ms 間隔で乱数入力の推論10回。推論を載せたときの予行）は Phase 1 の実機確認が済むまで 1
+テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）と NPU_PT_TEST（infer_task.c、パススルー中にタップリングの窓ごと＝約 960ms 間隔で乱数入力の推論10回。推論を載せたときの予行）は Phase 1 の実機確認が済むまで 1。 PREPROC_TEST（infer_task.c、前処理を PC と突き合わせる。タスク8）は 1、AED_USE_TEST_CLIPS（npu_selftest.c、30 本で NPU を判定）は ROM の都合で 0
 既知の罠
 tm_printf はカーネル起動前（knl_start_mtkernel より前）に使えない。 起動前の初期化関数は Error_Handler() を呼ばず、結果を変数に記録してカーネル起動まで到達させる
 FSBL がペリフェラルを触った状態でアプリが起動する。 HAL_xxx_Init が HAL_ERROR を返したら __HAL_RCC_xxx_FORCE_RESET()/RELEASE_RESET() で戻してから初期化（MDF1 で発生。XSPI2 は最初からリセットしてから初期化している）
@@ -100,9 +100,10 @@ usermain は μT-Kernel の初期タスクで、スタックが 1KB（INITTASK_S
 AED の末尾: epoch 29（NPU、Gemm）→ int8 x10 を 0x34350000 → epoch 30（SW、DequantizeLinear。scale/zp は外部フラッシュ 0x704a1590 / 0x704a1760）→ float x10 を 0x34350440 → epoch 31（SW、Softmax）→ 0x34350410。epoch 31 が 0x34350000〜 を作業域に使うので、推論後に int8 ロジットは残らない。途中の値は npu_rt_set_epoch_hook で取る（npu_selftest.c の logit_hook）
 PC の参照（aed_ref.py）の int8 ロジットは、ORT の最適化あり（int8 演算）となし（float 演算）で最大 15 LSB 違う（上位クラスでは 2 LSB）。NPU との比較の許容幅はこれを踏まえて決める
 NPU の正しさの判定は ESC-10 の実録音 30 本の1位を PC と比べる（npu_selftest.c の clips_check、入力は scripts/aed_clips.py が生成する aed_test_clips.h）。乱数入力は分布外で上位2クラスが拮抗し、丸めの積み重ねで確率が動くので参考値だけ
-aed_test_clips.h は ESC-50 由来なのでコミットしない（.gitignore）。無ければ npu_selftest.c は __has_include で実録音の判定を飛ばす（NOT JUDGED）。ヘッダ無しでビルドした後は .d にヘッダが載らず make が作り直さないので、aed_clips.py が npu_selftest.c の更新時刻を進める。30 本入りでコード領域 436,800B / 511KB（83.5%）。足りなくなったら本数を減らすかヘッダを消す
+aed_test_clips.h・aed_ref_clips.h は ESC-50 由来なのでコミットしない（.gitignore）。無ければボード側は __has_include でその判定を飛ばす（NOT JUDGED / SKIP）。ヘッダ無しでビルドした後は .d にヘッダが載らず make が作り直さないので、aed_clips.py が npu_selftest.c と infer_task.c の更新時刻を進める
+ROM が足りないので、30 本の判定（aed_test_clips.h、入力だけで 184,320B）と前処理の突き合わせ（aed_ref_clips.h、2 本の生 PCM + テンソルで 74,688B）は同時に載せない。切り替えは npu_selftest.c の AED_USE_TEST_CLIPS と infer_task.c の PREPROC_TEST。前処理側だけを 1 にした状態でコード領域 345,876B / 511KB（66.1%）、30 本側だけなら 436,800B（83.5%）
 epoch フック（npu_rt_set_epoch_hook）は今は呼ばれない。stai_network_run（ll_aton_stai_internal.c:417-425）が推論のたびに epoch コールバックを NULL か stai 自身のものに設定し直すため。直すなら stai_network_set_callback() で登録する（未実施）
-前処理 log-mel の仕様（タスク8 でボードに移植するときの参照。PC 実装は scripts/aed_clips.py の logmel_q8。ST の値は GenHeader/user_config_aed.yaml → Dpu/ai_model_config.h.aed・user_mel_tables.c.aed）
+前処理 log-mel の仕様（ボードの実装は Application/aed/preproc.c＝タスク8。PC 実装は scripts/aed_clips.py の logmel_q8。ST の値は GenHeader/user_config_aed.yaml → Dpu/ai_model_config.h.aed・user_mel_tables.c.aed）
   入力: int16 16kHz の先頭 15600 サンプル。列 i（0〜95）はサンプル [160i, 160i+400)
   列ごと: x/32768（arm_q15_to_f16）→ 周期ハン窓 400（0.5-0.5cos(2πn/400)）→ 左右 56 ずつゼロ詰めして 512 点 rfft → 振幅 |X| 257 本（MAGNITUDE。2乗しない）→ メルフィルタ 64 本（librosa の mel、htk=True・norm=None・125〜7500Hz。非ゼロ係数 461 個を start/stop 番号で持つ）→ ref=1.0 で割る → 0 以下は FLT_MIN → 自然対数（dB ではない。TopdB の切り捨て無し）
   量子化: int8 = SSAT(roundf(logmel × (1/0.0305305421) + 33), 8)。roundf は 0.5 を 0 から遠い側へ丸める（numpy の rint は偶数丸めなので違う）
@@ -110,6 +111,9 @@ epoch フック（npu_rt_set_epoch_hook）は今は呼ばれない。stai_networ
   ST の実装箇所: preproc_dpu.c:33-80（初期化。ゼロ詰め :52-53、Ref/TopdB :69-70）、feature_extraction_f16.c:264 LogMelSpectrogramColumn_q15_f16_Q8（量子化 :334-337）、audio_din_f16.c:30、mel_filterbank_f16.c:214。窓とメルの表は aed_clips.py が毎回 ST の表と照合する（差は窓 2.8e-8、メル 5e-12）
   ST は FP16 で計算する（app_config.h の PREPROC_FLOAT_16。inv_scale も FP16 に丸めて 32.75）。PC 実装とボードへの移植は float32 の想定で、int8 で 1 LSB 程度ずれ得る
   ESC-10 の 30 本で PC の1位が正解と一致 29/30（最適化あり・なし同じ）。前処理・並び・クラス順が正しい裏付け（外れは静かな crackling_fire 1本が clock_tick）
+  ボードの実装（preproc.c）は CMSIS-DSP を使わず、窓・ツイドル・メルフィルタの表を preproc_init() が double で作って float32 で持つ（ROM を使わない。表の係数は 461 個で ST・PC と同じ）。FFT は 512 点の複素 radix-2（実部に信号、虚部 0）。量子化は ST と同じ順序（roundf(v × inv_scale + zp) → SSAT）
+  移植の確認は infer_task.c の preproc_test（PREPROC_TEST）。aed_ref_clips.h の生 PCM 2 本をボードで log-mel にして PC のテンソルと 6144 要素すべて比べ、そのテンソルで推論して1位を PC と並べる。前処理と NPU の切り分けのため PC のテンソルでの推論も行う。差が 1 を超える要素があれば移植が違う（float32 と float64 の差では出ない）
+  preproc.c と同じ計算を float32 で書き直した PC 版（使い捨て。未コミット）を PC のテンソルと比べたところ、2 本とも 6144 要素すべて一致した＝表の作り方・FFT・メル・量子化・並びは合っている。実機は未確認（GCC が積和を VFMA にまとめる・newlib の logf が numpy と 1ulp 違うと、丸めの境界の要素が 1 LSB 動き得る）
 PowerShell 5.1 用スクリプトは UTF-8 BOM 付きで保存する（BOM 無しだと日本語コメントで param() が壊れる）
 ビルド設定
 Appli プロジェクトは親の Drivers/STM32N6xx_HAL_Driver/Src/ を .project で個別参照している。新しい HAL を使う場合:
@@ -121,6 +125,7 @@ NPU ランタイムの定義・インクルードパス・ライブラリは .cp
 .cproject を CubeIDE の外で書き換えたら、CubeIDE でプロジェクトを Refresh（F5）してからビルドし、Debug/ の mk を作り直させる（scripts/build.sh は既存の mk を使うだけで .cproject を読まない）
 Application/ 配下に新規ファイル・フォルダを作ったら CubeIDE でプロジェクトを Refresh（F5）
 Debug/ 配下の mk 系は CubeIDE が生成する。手動編集しない。ビルド対象の追加・除外は GUI で行い .cproject に永続化する
+CubeIDE を開けないまま新しいフォルダ（例 Application/aed/）を scripts/build.sh でビルドするには Debug/ の4か所が要る: sources.mk の SUBDIRS、makefile の -include <dir>/subdir.mk、objects.list（リンクは OBJS ではなくこの静的な一覧を使う。*.list なので git 管理外＝手元だけの変更）、<dir>/subdir.mk（既存フォルダのものをコピーしてファイル名を差し替える。行末は CRLF だが継続行とレシピ行だけ LF）。次に CubeIDE で F5 すれば同じ内容が作り直される
 Git
 コミットメッセージは日本語。1行目は Conventional Commits（feat:, fix:, refactor:, docs: など、スコープは audio/fault/trace/npu 等）、空行、なぜ変えたか
 論理単位でステージする

@@ -21,6 +21,16 @@
 EXPORT BOOL npu_selftest(void);
 
 /*
+ * 与えた入力 (int8 NPU_RT_IN_BYTES バイト) で1回推論する。呼び出し側の入力を NPU の
+ * 入力バッファへ写し、D キャッシュを clean+invalidate してから走らせる。
+ * out には softmax 後の float x NPU_RT_OUT_CLASSES、*us に推論時間を返す。
+ * 前処理セルフテスト (infer_task.c) が、ボードで作ったテンソルと PC のテンソルを
+ * 入れ替えて推論するのに使う。
+ * 戻り値: E_OK / E_OBJ NPU ランタイムが未初期化 / その他 npu_rt_run() の戻り値
+ */
+EXPORT ER npu_selftest_infer(const B *in, float *out, UW *us);
+
+/*
  * 乱数入力で1回推論し、npu_selftest() の最初の推論の出力と比べる。
  * *us: 推論時間、*diff_x1e4: 各クラスの差の最大値 (x1e-4)、*same: ビット単位で同じ
  * 戻り値: E_OK / E_OBJ npu_selftest() の推論が済んでいない / その他 npu_rt_run() の戻り値

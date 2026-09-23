@@ -8,10 +8,20 @@
 #include "ll_aton_NN_interface.h"	// EpochBlock_Flags_pure_sw
 
 /*
+ * 1: ESC-10 の実録音 30 本で NPU の推論を判定する (aed_test_clips.h。入力だけでコード領域が
+ * 184,320B 増える)。0 にするとヘッダがあってもビルドから外れる。
+ * タスク8 の前処理セルフテスト (infer_task.c) が生 PCM 入りのヘッダ (aed_ref_clips.h、
+ * 2 本で 74,688B) を持つので、両方を同時に載せるとコード領域 511KB に収まらない。
+ * NPU の推論そのものを 30 本で確かめ直すときだけ 1 に戻す (そのときは infer_task.c の
+ * PREPROC_TEST を 0 にする)
+ */
+#define AED_USE_TEST_CLIPS	(0)
+
+/*
  * ESC-10 の実録音 30 本の入力と PC の1位 (scripts/aed_clips.py の生成物)。ESC-50 由来のデータ
  * なのでコミットしない (.gitignore)。無ければ実録音の判定だけを飛ばしてビルドは通す
  */
-#if __has_include("aed_test_clips.h")
+#if AED_USE_TEST_CLIPS && __has_include("aed_test_clips.h")
 #include "aed_test_clips.h"
 #define NPU_HAVE_CLIPS		(1)
 #else
@@ -26,10 +36,13 @@
  *   npu_selftest():
  *      - 乱数入力で1回推論し、ONNX Runtime の期待値2通りと比べる (参考値。判定しない)
  *      - 同じ乱数入力で softmax 直前の int8 ロジットを比べる (参考値。フックの呼ばれ方も記録)
- *      - ESC-10 の実録音 30 本を推論し、1位を PC と比べる (これで PASS / FAIL)
+ *      - ESC-10 の実録音 30 本を推論し、1位を PC と比べる (これで PASS / FAIL。
+ *        AED_USE_TEST_CLIPS が 0 のときは飛ばし、2 本での判定を前処理セルフテストに任せる)
  *      - 乱数入力で10回連続。毎回の推論時間と、最初の推論の出力との差
  *   npu_selftest_run_fixed():
  *      乱数入力で1回推論し、最初の推論の出力と比べる (パススルー中の推論の予行に使う)
+ *   npu_selftest_infer():
+ *      与えた入力で1回推論する (タスク8 の前処理セルフテストが使う)
  */
 
 /*
@@ -432,9 +445,14 @@ EXPORT BOOL npu_selftest(void)
 #if NPU_HAVE_CLIPS
 	pass = clips_check();
 	tm_printf((UB*)"npu selftest %s (judged by the clip test)\n", pass ? "PASS" : "FAIL");
-#else
+#elif AED_USE_TEST_CLIPS
 	(void)pass;
 	tm_printf((UB*)"npu clip test: SKIP (aed_test_clips.h not found: run scripts/aed_clips.py)\n");
+	tm_printf((UB*)"npu selftest NOT JUDGED\n");
+#else
+	(void)pass;
+	tm_printf((UB*)"npu clip test: SKIP (AED_USE_TEST_CLIPS=0 to save code space;"
+			" the preproc test judges 2 clips instead)\n");
 	tm_printf((UB*)"npu selftest NOT JUDGED\n");
 #endif
 
@@ -465,6 +483,18 @@ EXPORT BOOL npu_selftest(void)
 		tm_printf((UB*)"  no run completed\n");
 	}
 	return TRUE;
+}
+
+/* ---------------------------------------------------------------- */
+/* 任意の入力で1回推論する (前処理セルフテスト用)                       */
+/* ---------------------------------------------------------------- */
+
+EXPORT ER npu_selftest_infer(const B *in, float *out, UW *us)
+{
+	*us = 0;
+	if(!npu_rt_ready() || npu_rt_input() == NULL) return E_OBJ;
+
+	return run_once(in, out, us, NULL, NULL);
 }
 
 /* ---------------------------------------------------------------- */
