@@ -20,7 +20,7 @@ Appli/.cproject（Debug 構成）	プリプロセッサ定義 LL_ATON_PLATFORM=L
 Startup タブに mtk3bsp2_stm32n657_Appli が追加されていること
 Appli 単体の構成で起動すると usermain() に到達しない
 直前に FSBL をビルドしておく
-ログ: powershell scripts/log.ps1 → logs/uart.log
+ログ: powershell scripts/log.ps1 → logs/uart_<日時>.log（走るたびに別ファイル。固定名に追記すると試験の行が混ざるため。名前を決めたいときや追記したいときは -Out で渡す）。-Timestamp で各行の先頭に PC の時計 HH:mm:ss.fff を付ける（aed_play_test.py のログと同じ形式で、対照試験の突き合わせに使う。既定はオフで出力は従来どおり。時刻はその行の先頭が届いた読み取りのもの。ReadExisting は行の途中で返るので、改行が来るまで溜めてから1行として書いている）
 COM ポートは1プロセスしか開けない。他のターミナルを閉じてから
 重みの書き込み（外部フラッシュ 0x70180000、署名不要）:
   STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -el <ExternalLoader>/MX66UW1G45G_STM32N6570-DK.stldr -hardRst -w aed_weights.hex
@@ -28,7 +28,8 @@ COM ポートは1プロセスしか開けない。他のターミナルを閉じ
 CubeProgrammer は CubeIDE 同梱: C:\ST\STM32CubeIDE_*\STM32CubeIDE\plugins\*cubeprogrammer*\tools\bin 重み hex はリポジトリに入れない（ST ライセンス・容量）。取得元は README に記載
 
 NPU 比較用の参照値（PC）: uv run scripts/aed_ref.py <GettingStarted-Audio>/Projects/X-CUBE-AI/models/yamnet_1024_64x96_tl_qdq_int8.onnx → Application/npu/aed_test_input.h を上書き生成（seed 固定なので同じ内容になる。softmax 後の値と、softmax 直前の int8 ロジット・scale・zero_point）
-対照試験（PC のスピーカーで鳴らす）: uv run scripts/aed_play_test.py <ESC-50>（--dry-run で音を出さず進行だけ、--silence/--interval で短縮）。0〜60秒は無音＝誤報の基準、60秒以降は5秒のクリップを15秒間隔で10本（dog / crying_baby / crackling_fire / sneezing / clock_tick を2巡）。記録は logs/play_<日時>.txt に 1行 = [+62.0s] dog 5-203128-A-0.wav。ボードの UART ログの JSON と経過秒で突き合わせる（別時計なので相対時刻。窓の番号 x 0.96 秒が目安）。再生は winsound（Windows のみ）で音量は OS 側任せ
+対照試験: uv run scripts/aed_play_test.py <ESC-50>（--dry-run でクリップを鳴らさず進行だけ、--skip-manual で生活音の区間を飛ばす、--silence/--interval で短縮）。区間は 0〜5秒 同期用の手拍子 → 5〜65秒 無音（誤報の基準）→ 65〜215秒 ESC-50 のクリップ5秒を15秒間隔で10本（dog / crying_baby / crackling_fire / sneezing / clock_tick を2巡）→ 215〜395秒 クラス外の生活音を15秒間隔で12回（ノック / 手拍子 / 紙 / 咳ばらい / 椅子 / マグ を2巡。3秒前に予告が出るので人が出す）。記録は logs/play_<日時>.txt に [+215.0s 03:14:35.210] MANUAL knock の形式（SYNC / PHASE / CLIP / MANUAL。経過秒と PC の時計 HH:MM:SS.mmm の両方。時刻の桁で空白の数が変わるのは種別の位置を揃えているため）。区間の切れ目に PHASE silence / PHASE clips / PHASE manual が入る（PHASE manual は最初の合図と同じ時刻に出す。ループの前に出すと最後のクリップの間隔ぶん早くなるため）。UART ログ側にも同じ形式の時計を付けて突き合わせる（別時計なので、最初の手拍子が両方のログに残るのを 0 点にする。窓の番号 x 0.96 秒も目安になる）
+  クリップはピークを -3dBFS にそろえてから鳴らす（ESC-50 は録音ごとに音量が違い、そろえないと「小さくて出なかった」のか「判定が外れた」のか切り分けられない）。正規化はメモリ上で行い winsound の SND_MEMORY | SND_ASYNC で鳴らす。元の RMS と掛けたゲインは CLIP 行に残す。時刻は PlaySound の直前に取り、再生の待ちは次の countdown に任せる（ログの I/O を時刻と再生開始の間に挟まない）。起動時に使うクリップ10本の一覧（RMS とゲイン）を表示し、ログにも # 行で残す。再生は winsound なので Windows のみ、OS の音量はスクリプトからは変えない
 実録音の判定用（PC）: uv run scripts/aed_clips.py <GettingStarted-Audio> <ESC-50> → Application/npu/aed_test_clips.h（30 本の int8 入力）と Application/aed/aed_ref_clips.h（そのうち2本の生 PCM も入れた前処理の突き合わせ用）。どちらもコミットしない。ESC-50 は git clone github.com/karolpiczak/ESC-50（使うのは meta/ と audio/ の 30 本。ファイル名はスクリプトに固定）
 
 ハード

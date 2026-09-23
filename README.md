@@ -57,7 +57,8 @@ FSBL と Appli の両方をビルドします。CubeIDE の GUI からビルド�
 3. ログの取得
 
    ```bash
-   powershell scripts/log.ps1   # → logs/uart.log
+   powershell scripts/log.ps1              # → logs/uart_<日時>.log
+   powershell scripts/log.ps1 -Timestamp   # 各行の先頭に PC の時計 (HH:mm:ss.fff) を付ける
    ```
 
 ### モデル重みの書き込み（Phase 2 以降）

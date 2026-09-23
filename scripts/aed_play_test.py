@@ -3,38 +3,60 @@
 # requires-python = ">=3.10"
 # dependencies = ["numpy==2.5.3"]
 # ///
-"""ESC-50 のクリップを PC のスピーカーから決まった順で鳴らし、鳴らした時刻とクラスを残す。
+"""ESC-50 のクリップとクラス外の生活音を決まった順で出し、時刻とクラスを記録する。
 
-ボードの対照試験に使う。誤報 (鳴っていないのに通知が出る) と検出漏れを、このログと
-ボードの UART ログ (logs/uart.log の1行 JSON) を突き合わせて数える。
+ボードの対照試験に使う。誤報 (鳴っていない・通知すべきでない音なのに通知が出る) と
+検出漏れを、このログとボードの UART ログ (1行 JSON) を突き合わせて数える。
 
 進行 (既定):
-    0〜60秒    無音。この間にボードが出した通知は全部誤報
-    60秒以降   5秒のクリップを15秒間隔で10本。dog / crying_baby / crackling_fire /
-               sneezing / clock_tick をこの順で2巡 (通知対象4クラス + 対象外の clock_tick)
+    0〜5秒      同期用の手拍子。ボードの peak に目印が残るので、ここで時刻を合わせる
+    5〜65秒     無音。この間に出た通知は全部誤報
+    65〜215秒   ESC-50 のクリップ (5秒) を15秒間隔で10本。dog / crying_baby /
+                crackling_fire / sneezing / clock_tick をこの順で2巡
+                (通知対象4クラス + 対象外の clock_tick)
+    215〜395秒  クラス外の生活音を15秒間隔で12回。3秒前に予告が出るので、その音を1回出す。
+                ドアをノック / 手拍子 / 紙をくしゃくしゃ / 咳ばらい / 椅子を引く /
+                マグを机に置く の6種を2巡。モデルの10クラスに無い音なので、
+                本来は unknown か通知対象外になるべきもの
+
+クリップはピークを -3dBFS にそろえて鳴らす (ESC-50 は録音ごとに音量が違うため)。
+元の RMS と掛けたゲインはログに残す。
 
 使い方 (uv が依存パッケージを用意する):
     uv run scripts/aed_play_test.py <ESC-50>
-    uv run scripts/aed_play_test.py <ESC-50> --dry-run              鳴らさずに進行だけ見る
+    uv run scripts/aed_play_test.py <ESC-50> --dry-run                  クリップを鳴らさない
+    uv run scripts/aed_play_test.py <ESC-50> --skip-manual              生活音の区間を飛ばす
     uv run scripts/aed_play_test.py <ESC-50> --silence 5 --interval 6   短くして動作確認
 
 出力: logs/play_<YYYYmmdd_HHMMSS>.txt
-    1行 = [+62.0s] dog 5-203128-A-0.wav   (# で始まる行は条件のメモ)
+    [+0.0s 03:11:00.004]    SYNC clap
+    [+5.0s 03:11:05.012]    PHASE silence
+    [+65.0s 03:12:05.120]   PHASE clips
+    [+65.0s 03:12:05.123]   CLIP dog 5-203128-A-0.wav rms=-17.5dBFS gain=-2.2dB
+    [+215.0s 03:14:35.208]  PHASE manual
+    [+215.0s 03:14:35.210]  MANUAL knock
+    (# で始まる行は条件のメモ。時刻の桁が変わっても種別の位置が揃うように空白を足している)
+
+時刻は「開始からの経過秒」と「PC の時計 (HH:MM:SS.mmm)」の両方。UART ログにも同じ形式の
+時計を付けて突き合わせる。クリップの時刻は winsound を呼ぶ直前に取っている。
 
 注意:
     - 再生は winsound なので Windows でだけ動く。音量は OS 側で一定にしておくこと
-      (このスクリプトからは音量を変えられない)
-    - ボードのログとは別時計なので、突き合わせは「開始からの経過秒」で行う。
-      ボードは約 0.96 秒ごとに窓を処理するので、窓の番号 x 0.96 秒が経過秒の目安になる
+      (このスクリプトからは OS の音量を変えられない)
+    - ボードとは別時計。最初の手拍子が両方のログに残るので、それを 0 点にすると合わせやすい
     - クリップは scripts/aed_clips.py の CLIPS (ESC-10、fold 5) から取る。
       メタデータの照合も aed_clips.py の read_meta / clip_path を使う
 """
 
 import argparse
+import io
 import sys
 import time
+import wave
 from datetime import datetime
 from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from aed_clips import CLIPS, clip_path, read_meta  # noqa: E402
@@ -47,32 +69,85 @@ except ImportError:		# Windows 以外。--dry-run なら動く
 REPO = Path(__file__).resolve().parent.parent
 LOG_DIR = REPO / "logs"
 
-# 鳴らす順 (1巡5本 x REPEAT)。clock_tick は通知対象外のクラスで、誤報の見え方を見るために入れる
+SYNC_S = 5.0			# 同期用の手拍子から無音区間までの間
+SILENCE_S = 60.0		# 無音 (誤報の基準)
+INTERVAL_S = 15.0		# クリップ・生活音を出す間隔
+CLIP_LEN_S = 5.0		# ESC-50 のクリップは全部5秒
+MANUAL_NOTICE_S = 3.0		# 生活音の予告を出すタイミング (何秒前か)
+TARGET_PEAK_DBFS = -3.0		# 鳴らす前にピークをここにそろえる
+
+# 鳴らすクリップの順 (1巡5本 x REPEAT)。clock_tick は通知対象外のクラスで、
+# 通知対象のクラスと同じように扱われないことを確かめるために入れる
 PLAY_ORDER = ["dog", "crying_baby", "crackling_fire", "sneezing", "clock_tick"]
 REPEAT = 2
-CLIP_LEN_S = 5.0		# ESC-50 のクリップは全部5秒
 
-SILENCE_S = 60.0
-INTERVAL_S = 15.0
+# クラス外の生活音 (ログに残す名前, 画面に出す指示)。2巡する
+MANUAL_ITEMS = [
+    ("knock",    "ドアをノックする (2〜3回)"),
+    ("handclap", "手を1回たたく"),
+    ("paper",    "紙をくしゃくしゃにする"),
+    ("cough",    "咳ばらいをする"),
+    ("chair",    "椅子を引く"),
+    ("mug",      "マグを机に置く"),
+]
+MANUAL_REPEAT = 2
 
 
-def wait_until(t0: float, sec: float) -> None:
-    """開始から sec 秒になるまで待つ。"""
+def row(elapsed: float, clock: datetime, tag: str, detail: str) -> str:
+    """ログの1行。時刻の桁が変わっても tag の位置が揃うように左詰めする。"""
+    stamp = f"[+{elapsed:.1f}s {clock:%H:%M:%S}.{clock.microsecond // 1000:03d}]"
+    return f"{stamp:<23} {tag} {detail}"
+
+
+def countdown(t0: float, target: float, text: str) -> None:
+    """開始から target 秒になるまで待つ。同じ行に「text 残り N 秒」を出し続ける。"""
     while True:
-        left = t0 + sec - time.monotonic()
+        left = t0 + target - time.monotonic()
         if left <= 0:
-            return
-        time.sleep(min(left, 0.05))
+            break
+        print(f"\r  {text} 残り {left:4.0f} 秒 ", end="", flush=True)
+        time.sleep(min(left, 0.2))
+    print("\r" + " " * 64 + "\r", end="", flush=True)	# 行を消す
+
+
+def load_clip(path: Path) -> tuple[bytes, float, float]:
+    """wav を読み、ピークを TARGET_PEAK_DBFS にそろえた WAV バイト列を作る。
+
+    ESC-50 は録音ごとに音量が違うので、そろえないと「小さい音だから出なかった」のか
+    「判定が外れた」のか分からなくなる。
+    戻り値: (WAV バイト列, 元の RMS [dBFS], 掛けたゲイン [dB])
+    """
+    with wave.open(str(path)) as w:
+        if (w.getnchannels(), w.getsampwidth()) != (1, 2):
+            sys.exit(f"{path}: mono 16bit でない")
+        rate = w.getframerate()
+        x = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float64)
+
+    peak = float(np.max(np.abs(x))) if x.size else 0.0
+    rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+    rms_db = 20.0 * np.log10(max(rms, 1e-9) / 32768.0)
+
+    gain = (32768.0 * 10.0 ** (TARGET_PEAK_DBFS / 20.0) / peak) if peak > 0 else 1.0
+    y = np.clip(np.rint(x * gain), -32768, 32767).astype("<i2")
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w2:
+        w2.setnchannels(1)
+        w2.setsampwidth(2)
+        w2.setframerate(rate)
+        w2.writeframes(y.tobytes())
+    return buf.getvalue(), rms_db, 20.0 * np.log10(gain)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("esc50", type=Path, help="ESC-50 のディレクトリ (meta/ と audio/)")
     ap.add_argument("--silence", type=float, default=SILENCE_S,
-                    help=f"最初の無音の長さ [秒] (既定 {SILENCE_S})")
+                    help=f"無音の長さ [秒] (既定 {SILENCE_S})")
     ap.add_argument("--interval", type=float, default=INTERVAL_S,
-                    help=f"クリップを鳴らす間隔 [秒] (既定 {INTERVAL_S})")
-    ap.add_argument("--dry-run", action="store_true", help="鳴らさずに時刻とログだけ")
+                    help=f"クリップ・生活音を出す間隔 [秒] (既定 {INTERVAL_S})")
+    ap.add_argument("--dry-run", action="store_true", help="クリップを鳴らさずに進行だけ")
+    ap.add_argument("--skip-manual", action="store_true", help="クラス外の生活音の区間を飛ばす")
     args = ap.parse_args()
 
     if args.interval < CLIP_LEN_S:
@@ -80,19 +155,35 @@ def main() -> None:
     if winsound is None and not args.dry_run:
         sys.exit("winsound が使えない (Windows で実行するか --dry-run を付けること)")
 
-    # 鳴らす順にクリップを決める。1巡目は各クラスの1本目、2巡目は2本目
+    # cp932 に無い文字があっても表示で落ちないようにする (ログは UTF-8 で書く)
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+    # 鳴らす順にクリップを決めて読み込む。1巡目は各クラスの1本目、2巡目は2本目。
+    # 鳴らす直前の処理を無くしておく (時刻と再生開始をずらさないため)
     meta = read_meta(args.esc50)
-    plan = []
+    clips = []
     for rep in range(REPEAT):
         for label in PLAY_ORDER:
             if rep >= len(CLIPS[label]):
                 sys.exit(f"{label}: CLIPS に {rep + 1} 本目が無い")
             fn = CLIPS[label][rep]
-            plan.append((label, fn, clip_path(meta, fn, label, args.esc50)))
+            wav, rms_db, gain_db = load_clip(clip_path(meta, fn, label, args.esc50))
+            clips.append({"label": label, "file": fn, "wav": wav,
+                          "rms_db": rms_db, "gain_db": gain_db})
+
+    manual = [] if args.skip_manual else MANUAL_ITEMS * MANUAL_REPEAT
+
+    # 区間の境目 (開始からの秒)
+    t_silence = SYNC_S
+    t_clips   = t_silence + args.silence
+    t_manual  = t_clips + args.interval * len(clips)
+    t_end     = t_manual + args.interval * len(manual)
 
     LOG_DIR.mkdir(exist_ok=True)
     log_path = LOG_DIR / f"play_{datetime.now():%Y%m%d_%H%M%S}.txt"
-    total = args.silence + args.interval * (len(plan) - 1) + CLIP_LEN_S
 
     with open(log_path, "w", encoding="utf-8", newline="\n") as log:
 
@@ -101,26 +192,78 @@ def main() -> None:
             log.write(line + "\n")
             log.flush()		# 途中で止めても残るように毎行書き出す
 
+        def note(line: str) -> None:
+            """# 付きのメモ (画面には出さない)"""
+            log.write("# " + line + "\n")
+            log.flush()
+
         out(f"# aed_play_test start {datetime.now():%Y-%m-%d %H:%M:%S}"
-            f"{' (dry run: 音は鳴らさない)' if args.dry_run else ''}")
-        out(f"# silence {args.silence:.1f}s -> {len(plan)} clips x {CLIP_LEN_S:.0f}s"
-            f" every {args.interval:.1f}s, total {total:.1f}s")
-        out(f"# clips from {args.esc50} (ESC-10, fold 5)")
-        out("# 0s から silence の間の通知は誤報。時刻は開始からの経過秒 (ボードとは別時計)")
+            f"{' (dry run: クリップは鳴らさない)' if args.dry_run else ''}")
+        out(f"# {t_silence:.1f}s silence {args.silence:.1f}s"
+            f" / {t_clips:.1f}s clips {len(clips)} x {CLIP_LEN_S:.0f}s every {args.interval:.1f}s"
+            f" / {t_manual:.1f}s manual {len(manual)} x every {args.interval:.1f}s"
+            f" / end {t_end:.1f}s")
+        out(f"# clips from {args.esc50} (ESC-10, fold 5), peak normalized to {TARGET_PEAK_DBFS}dBFS")
+        out("# SYNC/PHASE/CLIP/MANUAL。時刻は 開始からの経過秒 と PC の時計 (HH:MM:SS.mmm)")
+
+        # --- 使うクリップの一覧 (鳴らす前に全部見せる) ---
+        print(f"\n=== 使うクリップ {len(clips)} 本 (ピークを {TARGET_PEAK_DBFS}dBFS にそろえる) ===")
+        for i, c in enumerate(clips):
+            line = (f"  {i + 1:2d} {c['label']:<15} {c['file']:<20}"
+                    f" rms={c['rms_db']:6.1f}dBFS gain={c['gain_db']:+6.1f}dB")
+            print(line)
+            note(line[2:])	# 先頭の字下げだけ落とす (strip すると番号の桁でずれる)
+        for i, (name, how) in enumerate(manual):
+            note(f"manual {i + 1:2d} {name} ({how})")
 
         t0 = time.monotonic()
-        for i, (label, fn, path) in enumerate(plan):
-            wait_until(t0, args.silence + args.interval * i)
-            out(f"[+{time.monotonic() - t0:.1f}s] {label} {fn}")
-            if args.dry_run:
-                continue
-            try:
-                # 同期再生。5秒ブロックしてから次の待ちに入る
-                winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_NODEFAULT)
-            except RuntimeError as e:
-                out(f"# [+{time.monotonic() - t0:.1f}s] PlaySound failed: {e}")
 
-        wait_until(t0, total)
+        # --- 同期用の手拍子 ---
+        print("\n=== 同期 ===")
+        print("  同期用に手を1回たたいてください (ボードの peak に目印が残ります)")
+        out(row(0.0, datetime.now(), "SYNC", "clap"))
+        countdown(t0, t_silence, "手をたたく")
+
+        # --- 無音 ---
+        print("=== 無音 (この区間の通知は誤報) ===")
+        out(row(time.monotonic() - t0, datetime.now(), "PHASE", "silence"))
+        countdown(t0, t_clips, "音を立てないでください")
+
+        # --- ESC-50 のクリップ ---
+        # 区間の切れ目。無音の待ちが終わった直後なので、最初の CLIP 行とほぼ同じ時刻になる
+        # (ここでログを書くのは最初のクリップの時刻を取る前。再生の時刻はずらさない)
+        print(f"=== クリップ {len(clips)} 本 ===")
+        out(row(time.monotonic() - t0, datetime.now(), "PHASE", "clips"))
+        for i, c in enumerate(clips):
+            countdown(t0, t_clips + args.interval * i, f"次: {c['label']}")
+
+            # 時刻は PlaySound の直前に取る。非同期で鳴らして、待つのは次の countdown に任せる
+            # (SND_MEMORY のバッファは clips が持っているので再生中に消えない)
+            el, clock = time.monotonic() - t0, datetime.now()
+            if not args.dry_run:
+                try:
+                    winsound.PlaySound(c["wav"], winsound.SND_MEMORY | winsound.SND_ASYNC)
+                except RuntimeError as e:
+                    note(f"[+{el:.1f}s] PlaySound failed: {e}")
+            out(row(el, clock, "CLIP", f"{c['label']} {c['file']}"
+                    f" rms={c['rms_db']:.1f}dBFS gain={c['gain_db']:+.1f}dB"))
+
+        # --- クラス外の生活音 (人が出す) ---
+        if manual:
+            print(f"=== クラス外の生活音 {len(manual)} 回 (予告が出たらその音を1回) ===")
+        for i, (name, how) in enumerate(manual):
+            target = t_manual + args.interval * i
+            countdown(t0, target - MANUAL_NOTICE_S, f"次: {how} まで")
+            print(f"  次: {how}  ({MANUAL_NOTICE_S:.0f} 秒後)")
+            countdown(t0, target, f"{how} まで")
+            if i == 0:
+                # 区間の切れ目。最初の合図の時刻 (= 生活音区間の始まり) に出す。
+                # ループの前に出すと、最後のクリップの間隔ぶん (既定15秒) 早い時刻になる
+                out(row(time.monotonic() - t0, datetime.now(), "PHASE", "manual"))
+            out(row(time.monotonic() - t0, datetime.now(), "MANUAL", name))
+            print(f"  >>> いま: {how} <<<")
+
+        countdown(t0, t_end, "終わりまで")
         out(f"# aed_play_test end (+{time.monotonic() - t0:.1f}s)")
 
     print(f"\nwrote {log_path.relative_to(REPO)}")
