@@ -387,6 +387,14 @@ EXPORT void lcd_clear(UB color)
 	memset(fb, color, LCD_FB_SIZE);
 }
 
+EXPORT void lcd_fill_rows(UINT y, UINT rows, UB color)
+{
+	if(y >= LCD_HEIGHT) return;
+	if(rows > LCD_HEIGHT - y) rows = LCD_HEIGHT - y;
+
+	memset(&fb[y * LCD_WIDTH], color, rows * LCD_WIDTH);
+}
+
 LOCAL void put_px(UINT x, UINT y, UB color)
 {
 	if(x >= LCD_WIDTH || y >= LCD_HEIGHT) return;

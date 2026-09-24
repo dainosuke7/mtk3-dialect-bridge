@@ -4,6 +4,7 @@
 #include "main.h"		// HAL_GPIO_WritePin, LED_RED_*
 #include "notify.h"
 #include "../audio/audio_task.h"	// audio_pt_counts()
+#include "../lcd/lcd_task.h"	// lcd_post() (画面に出す。待たない)
 #include "../trace/log.h"	// log_printf()
 #include "../trace/trace.h"	// NOW(), trace_cyc_to_us()
 
@@ -182,6 +183,13 @@ EXPORT void notify_window(UW win, INT cls, float p, UW peak, UW t_ready, BOOL la
 		}
 	} else {
 		led_on_for_a_while();
+		/*
+		 * 画面にも出す (タスク2-2)。判定はここまでで決まっていて、この呼び出しは
+		 * 渡すだけ。表示タスクは優先度25 なので待たない (TMO_POL で、いっぱいなら
+		 * 捨てて数える。JSON と同じ流儀)。通知の時刻を渡し、表示までにかかった
+		 * 時間は表示タスク側で測る
+		 */
+		(void)lcd_post(cls, (INT)(p * 100.0f + 0.5f), win, NOW());
 	}
 	prev_cls = cls;
 	first    = FALSE;

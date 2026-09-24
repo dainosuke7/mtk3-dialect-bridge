@@ -45,6 +45,12 @@ EXPORT BOOL lcd_ready(void);
 EXPORT void lcd_clear(UB color);
 
 /*
+ * 行の帯 (y から rows 行) を1色で塗る。書き換えるところだけ消すのに使う
+ * (全画面を消さないため)。画面の外は切り詰める
+ */
+EXPORT void lcd_fill_rows(UINT y, UINT rows, UB color);
+
+/*
  * 文字列を描く。フォントは ST BSP の Font24 (17x24) を scale 倍に拡大したもの。
  * 画面の外に出る部分は描かない
  */

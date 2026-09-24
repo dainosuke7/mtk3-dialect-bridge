@@ -7,6 +7,7 @@
 #include "npu_selftest.h"
 #include "../aed/preproc.h"
 #include "../aed/notify.h"
+#include "../lcd/lcd_task.h"	// lcd_post_stats() (集計行の disp)
 #include "../audio/tap_ring.h"
 #include "../audio/audio_task.h"
 #include "../trace/trace.h"	// trace_muted(), trace_busy(), trace_cyc_per_us()
@@ -233,6 +234,7 @@ LOCAL void show_summary(const char *why)
 	TAP_STATS	st;
 	UW		under, over, late;
 	UW		n_out, n_held, n_offlist, n_gated, lat_max, lat_loose;
+	UW		d_sent, d_drop, d_max, d_avg;
 
 	tap_ring_stats(&st);
 	audio_pt_counts(&under, &over, &late);
@@ -258,6 +260,10 @@ LOCAL void show_summary(const char *why)
 			n_out, n_held, n_offlist, n_gated, lat_max, lat_loose);
 	log_printf("  log sent=%u dropped=%u lag max=%uus\n",
 			log_sent(), log_dropped(), log_lag_max_us());
+
+	/* 画面: 通知から描き終わりまで (フェーズ3 で「通知遅延 + 画面」と並べて書く) */
+	lcd_post_stats(&d_sent, &d_drop, &d_max, &d_avg);
+	log_printf("  disp sent=%u dropped=%u max=%uus avg=%uus\n", d_sent, d_drop, d_max, d_avg);
 }
 
 /* ---------------------------------------------------------------- */

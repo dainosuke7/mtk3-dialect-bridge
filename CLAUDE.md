@@ -62,7 +62,7 @@ MIC_DET で外部マイクボード装着時はオンボードマイクがバイ
 10	task_audio, task_1	パススルー制御・統計表示 / 生存表示の LED 点滅（緑 PO1）
 15	task_infer	NPU ランタイムの初期化・自己テスト・窓ごとの 前処理→推論→判定→通知（infer_task.c。ll_aton を呼ぶのはこのタスクだけ）
 20	reporter	UART 出力の唯一の書き手（メッセージバッファから受けて出す）＋1秒レート表示
-25	task_lcd	LCD の初期化と描画（lcd_task.c。タスク2-1 は固定文字を1回描いて寝る）
+25	task_lcd	LCD の初期化と描画（lcd_task.c。検出をクラス名で出し、3秒後に待機表示へ戻す）
 32	dump	トレース状態機械・CSV ダンプ
 task_2（赤 LED の点滅と "task 2" 表示）はタスク9 で削除した。赤 LED（PG10）は検出の通知に使う（Application/aed/notify.c）
 DMA コールバックは TRACE → カウンタ更新 → tk_set_flg だけ行い即 return
@@ -149,6 +149,14 @@ LCD（Phase 2 タスク2-1。Application/lcd/）
   L8 の PFCR は 7 が正しい。PF フィールドは 3bit で、L8/ARGB1555/ARGB4444/AL44/AL88 は PF=0x7（LTDC_LxPFCR_PF）を書いて実際の形式を FPF0R / FPF1R で指定する（stm32n6xx_hal_ltdc.c:4037-4048）。HAL のマクロ LTDC_PIXEL_FORMAT_L8（0x9）は HAL 内部の識別子でレジスタの値ではない
   フレームバッファは L8 + CLUT 16色。CPU で描いてから lcd_flush_rows() で D キャッシュを clean する（LTDC は AXI から直接読む。1行 800B は 32B の倍数なので行境界＝ラインの境界）
   AXISRAM3 のクロックと電源は npu_hw_init() が入れている（npu_hw.c の NPU_MEMEN に AXISRAM3EN）。LCD 単独で動かすときはそこを確認する
+検出の表示（タスク2-2）
+  受け渡しは lcd_task.c のメッセージバッファ（8件）。notify.c が通知を出すところ（LED を点けるのと同じ箇所）から lcd_post(cls, p100, win, NOW()) を呼ぶ。tk_snd_mbf は TMO_POL で、いっぱいなら捨てて数える（JSON と同じ流儀。推論タスクを表示で待たせない）。判定そのもの（notify_decide と通知するかの条件）は変えていない
+  画面は中央の帯（y=192、96行）にクラス名を Font24 の4倍（68x96 画素）で中央寄せ。英字は lcd_task.c の disp_name（dog→DOG、crying_baby→BABY、sneezing→SNEEZE、crackling_fire→FIRE）。待機は "READY"
+  検出から LCD_HOLD_MS（3秒）は保持し、その間に別のクラスが来たら上書きする。3秒経ったら待機表示に戻す。unknown は送らない（画面は時間で戻す方式なので、送ると3秒より早く消えてしまう）
+  描くのは書き換える帯だけで全画面は消さない。clean も その帯だけ（1行 800B が 32B の倍数なので帯の境界＝キャッシュラインの境界）
+  生存表示は左上（y=8、24行）に1秒ごとに 0〜9 が変わる数字。止まると同じ数字のままになる
+  待ちは「次にやること（生存表示の更新か保持の解除）までの残り時間」を tk_rcv_mbf のタイムアウトにする（無駄に起きない）
+  通知から描き終わりまでは集計行の disp max / avg（lcd_post_stats）。フェーズ3 で「通知遅延 + 画面」と並べて書く
 PowerShell 5.1 用スクリプトは UTF-8 BOM 付きで保存する（BOM 無しだと日本語コメントで param() が壊れる）
 ビルド設定
 Appli プロジェクトは親の Drivers/STM32N6xx_HAL_Driver/Src/ を .project で個別参照している。新しい HAL を使う場合:
