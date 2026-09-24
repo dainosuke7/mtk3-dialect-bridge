@@ -73,6 +73,24 @@ uint32_t g_mdf1_step = 0;
  * stm32n6xx_it.c's GPDMA1_Channel0_IRQHandler() must reach it. */
 DMA_HandleTypeDef hDmaMdf;
 
+/* LTDC (LCD) の画素クロック。パネルは RK050HR18 (800x480、LTDC 直結)。
+ * ST の BSP (STM32N6570-DK stm32n6570_discovery_lcd.c の MX_LTDC_ClockConfig) は
+ * 「Typical PCLK is 25 MHz」として LTDC <- IC16 <- PLL4 を選ぶが、PLL4 自体の設定は
+ * アプリ側に任されている (FSBL も PLL4 は RCC_PLL_NONE)。
+ * ここで PLL4 を HSI から 1200MHz にして IC16 で 48 分周し、25MHz を作る。
+ * 源を HSI にするのは、FSBL の HSE 起動に依存しないため。HSI は FSBL が CPU の PLL1 に
+ * 使っているので、動いていなければそもそも起動しない。M / N は PLL1 と同じ値なので
+ * VCO の条件も実機で確かめが済んでいる (FSBL の main.c の PLL1 設定)。
+ * PLL の設定をカーネル起動前に済ませるのは、起動後は HAL_GetTick() の分解能が 10ms に
+ * なり、PLL ロック待ちの数 ms のタイムアウトが誤判定になり得るため (MX_SAI1_Init と同じ)。
+ * 結果は変数に残し、表示タスク (Application/lcd/) が起動後にログへ出す */
+#define LTDC_PLL4_M		(4U)	/* HSI 64MHz / 4 = 16MHz (VCO 入力。PLL1 と同じ) */
+#define LTDC_PLL4_N		(75U)	/* 16MHz x 75 = 1200MHz (PLL1 と同じ) */
+#define LTDC_IC16_DIV		(48U)	/* 1200MHz / 48 = 25MHz */
+
+HAL_StatusTypeDef g_ltdc_clk_status = HAL_ERROR;
+uint32_t g_ltdc_kerclk = 0;
+
 /* SAI1のマスタクロック分周比(16kHz用)。導出はMX_SAI1_Init()のコメント参照 */
 #define SAI1_MCKDIV_16K		(12U)
 
@@ -93,6 +111,7 @@ static void MX_I2C2_Init(void);
 static void MPU_Config(void);
 static void MX_SAI1_Init(void);
 static void MX_MDF1_Init(void);
+static void MX_LTDC_Clock_Init(void);
 
 /* USER CODE END PFP */
 
@@ -456,6 +475,51 @@ static void MX_SAI1_Init(void)
  * HAL_RCCEx_PeriphCLKConfig/HAL_MDF_Init returned) for Application/ code to
  * check and report over UART once the kernel is up.
  */
+/*
+ * LCD の画素クロックだけを用意する (LTDC 本体・GPIO・パネルの制御は Application/lcd/)。
+ * 値の根拠は上の LTDC_PLL4_* のコメント。
+ * MX_SAI1_Init() と同じ理由で Error_Handler() も tm_printf() も使わず、結果を変数に残す。
+ */
+static void MX_LTDC_Clock_Init(void)
+{
+  RCC_OscInitTypeDef       RCC_OscInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+
+  g_ltdc_clk_status = HAL_ERROR;
+
+  /* PLL4 = HSI / M * N = 1200MHz (P1 = P2 = 1)。発振器と他の PLL には触らない
+   * (HSI は FSBL が PLL1 のために起動済み) */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_NONE;
+  RCC_OscInitStruct.PLL1.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL2.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL3.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL4.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL4.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL4.PLLFractional = 0;
+  RCC_OscInitStruct.PLL4.PLLM = LTDC_PLL4_M;
+  RCC_OscInitStruct.PLL4.PLLN = LTDC_PLL4_N;
+  RCC_OscInitStruct.PLL4.PLLP1 = 1;
+  RCC_OscInitStruct.PLL4.PLLP2 = 1;
+  g_ltdc_clk_status = HAL_RCC_OscConfig(&RCC_OscInitStruct);
+  if (g_ltdc_clk_status != HAL_OK)
+  {
+    return;
+  }
+
+  /* LTDC <- IC16 <- PLL4 / 48 = 25MHz (BSP の MX_LTDC_ClockConfig と同じ経路) */
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_LTDC;
+  PeriphClkInitStruct.LtdcClockSelection = RCC_LTDCCLKSOURCE_IC16;
+  PeriphClkInitStruct.ICSelection[RCC_IC16].ClockSelection = RCC_ICCLKSOURCE_PLL4;
+  PeriphClkInitStruct.ICSelection[RCC_IC16].ClockDivider = LTDC_IC16_DIV;
+  g_ltdc_clk_status = HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct);
+  if (g_ltdc_clk_status != HAL_OK)
+  {
+    return;
+  }
+
+  g_ltdc_kerclk = HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_LTDC);
+}
+
 static void MX_MDF1_Init(void)
 {
   RCC_OscInitTypeDef       RCC_OscInitStruct = {0};
@@ -679,6 +743,7 @@ int main(void)
   MX_I2C2_Init();	// WM8904 (I2C2) bring-up; see MX_I2C2_Init() comment above
   MX_SAI1_Init();	// WM8904 audio data path (SAI1); see MX_SAI1_Init() comment above
   MX_MDF1_Init();	// onboard PDM mic (MDF1); see MX_MDF1_Init() comment above
+  MX_LTDC_Clock_Init();	// LCD pixel clock (PLL4 -> IC16 -> LTDC); see comment above
 
   void knl_start_mtkernel(void);
   knl_start_mtkernel();

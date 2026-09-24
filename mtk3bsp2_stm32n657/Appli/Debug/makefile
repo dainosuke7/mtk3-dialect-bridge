@@ -134,6 +134,8 @@ RM := rm -rf
 -include Application/npu/st/ll_aton/subdir.mk
 -include Application/npu/st/device/subdir.mk
 -include Application/npu/subdir.mk
+-include Application/lcd/st/subdir.mk
+-include Application/lcd/subdir.mk
 -include Application/fault/subdir.mk
 -include Application/extflash/mx66uw1g45g/subdir.mk
 -include Application/extflash/subdir.mk

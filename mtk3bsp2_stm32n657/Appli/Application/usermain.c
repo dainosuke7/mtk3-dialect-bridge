@@ -6,6 +6,7 @@
 #include "npu/npu_hw.h"
 #include "npu/infer_task.h"
 #include "aed/notify.h"
+#include "lcd/lcd_task.h"
 #include "audio/tap_ring.h"
 #include "fault/fault.h"
 #include "trace/trace.h"
@@ -218,6 +219,11 @@ EXPORT INT usermain(void)
 	/* 通知 (JSON と赤 LED)。推論タスクが窓を処理する前に */
 	er = notify_init();
 	tm_printf((UB*)"notify_init: ret=%d\n", er);
+
+	/* 表示タスク (優先度25)。LCD の初期化はタスクの中で行う。
+	 * フレームバッファは AXISRAM3 なので npu_hw_init の後に起こす */
+	er = lcd_task_start();
+	tm_printf((UB*)"lcd_task_start: ret=%d\n", er);
 
 	/* 推論タスク: 推論ランタイムの初期化と自己テストの後、タップリングの窓を待つ。
 	 * ランタイムはスタックを多く使うので、この初期タスク (スタック 1KB) では呼ばない。

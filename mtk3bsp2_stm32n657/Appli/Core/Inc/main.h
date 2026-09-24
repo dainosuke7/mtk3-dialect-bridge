@@ -119,6 +119,10 @@ extern DMA_HandleTypeDef hDmaMdf;
 extern uint32_t g_sai1_kerclk;
 extern uint32_t g_sai1_mckdiv;
 
+/* LCD の画素クロック (MX_LTDC_Clock_Init の結果)。表示は Application/lcd/ が行う */
+extern HAL_StatusTypeDef g_ltdc_clk_status;
+extern uint32_t g_ltdc_kerclk;
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/

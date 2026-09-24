@@ -28,6 +28,8 @@ Application/audio \
 Application/extflash \
 Application/extflash/mx66uw1g45g \
 Application/fault \
+Application/lcd \
+Application/lcd/st \
 Application/npu \
 Application/npu/st/device \
 Application/npu/st/ll_aton \

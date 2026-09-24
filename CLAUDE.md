@@ -11,7 +11,10 @@ TRONプログラミングコンテスト2026 — 屋内音お知らせ機
 例外として変更した場所（増やしたら必ずここに追記する）
 場所	内容	理由
 Appli/Core/Src/main.c	MX_I2C2_Init, MX_SAI1_Init, MX_MDF1_Init, MPU_Config を追加	音声経路（WM8904制御・SAI出力・PDM入力）に必要
+Appli/Core/Src/main.c, Core/Inc/main.h	MX_LTDC_Clock_Init を追加（g_ltdc_clk_status / g_ltdc_kerclk を main.h に extern）	LCD の画素クロック（PLL4→IC16→LTDC 25MHz）。PLL のロック待ちはカーネル起動後だと HAL_GetTick の分解能 10ms で誤タイムアウトし得るので起動前に置く
 Appli/Core/Inc/stm32n6xx_hal_conf.h	HAL_XSPI_MODULE_ENABLED を有効化。Appli/.project に stm32n6xx_hal_xspi.c の link を追加	アプリ側で XSPI2 を初期化して外部フラッシュをメモリマップする（Application/extflash/）ため
+Appli/Core/Inc/stm32n6xx_hal_conf.h	HAL_LTDC_MODULE_ENABLED を有効化。Appli/.project に stm32n6xx_hal_ltdc.c / _ltdc_ex.c の link を追加	LCD（Application/lcd/）で LTDC を使うため
+Drivers/STM32N6xx_HAL_Driver/{Src,Inc}/	stm32n6xx_hal_ltdc.c/.h と _ltdc_ex.c/.h を追加（無改変）	手元の HAL に LTDC ドライバが無かった。STM32CubeN6 v1.3.0 から、版が手元と同じ v1.3.0 であることを確認して入れた（README のソフトウェア一覧に記載）
 Appli/.cproject（Debug 構成）	プリプロセッサ定義 LL_ATON_PLATFORM=LL_ATON_PLAT_STM32N6 / LL_ATON_OSAL=LL_ATON_OSAL_BARE_METAL / LL_ATON_RT_MODE=LL_ATON_RT_POLLING / LL_ATON_SW_FALLBACK / LL_ATON_DBG_BUFFER_INFO_EXCLUDED=1、インクルードパス ../Application/npu/st/{ll_aton,device,inc,model}、ライブラリ :NetworkRuntime1200_CM55_GCC.a（検索パス ../Application/npu/st/lib）	NPU 推論ランタイム（Application/npu/st/）のビルドに必要
 変更は可能な限り USER CODE BEGIN/END 区画の中に書く（CubeMX 再生成で消えない）
 コマンド
@@ -40,7 +43,8 @@ SW1(BOOT1) は 1-3 側（Development boot）
 メモリマップ
 領域	アドレス	用途
 アプリ（内部RAM）	ROM 0x34000400 +511K / RAM 0x34080000 +1536K（〜0x34200000）	BSP2 リンカ定義。コード領域 511K を超えないか監視
-AXISRAM3〜5	0x34200000〜	未使用。LCD フレームバッファ候補
+AXISRAM3	0x34200000〜（448KB。stm32n657xx.h の SRAM3_AXI_BASE_S のコメント）	LCD のフレームバッファ。L8 800x480 = 384,000B を先頭に置く（終端 0x3425DC00。NPU の AXISRAM6 とは約 969KB 離れていて重ならない）
+AXISRAM4〜5	0x34270000〜	未使用
 AXISRAM6	0x34350000〜（NPU は 144KB 使用）	NPU activations。番地は network.c に固定。入力 int8 6144B は 0x34350000〜、出力 float32 x10 は 0x34350410〜（入力の領域の中。推論中に入力の領域は中間結果・出力の置き場として上書きされる）
 NPU キャッシュ RAM	0x343C0000〜（256KB）	CACHEAXI 用。NPU キャッシュを有効にしている間は SRAM として使わない
 外部フラッシュ: アプリ	0x70100000〜（FSBL ソース上。起動ログは 0x71000400 と表示、未解決）	署名済みアプリ
@@ -58,6 +62,7 @@ MIC_DET で外部マイクボード装着時はオンボードマイクがバイ
 10	task_audio, task_1	パススルー制御・統計表示 / 生存表示の LED 点滅（緑 PO1）
 15	task_infer	NPU ランタイムの初期化・自己テスト・窓ごとの 前処理→推論→判定→通知（infer_task.c。ll_aton を呼ぶのはこのタスクだけ）
 20	reporter	UART 出力の唯一の書き手（メッセージバッファから受けて出す）＋1秒レート表示
+25	task_lcd	LCD の初期化と描画（lcd_task.c。タスク2-1 は固定文字を1回描いて寝る）
 32	dump	トレース状態機械・CSV ダンプ
 task_2（赤 LED の点滅と "task 2" 表示）はタスク9 で削除した。赤 LED（PG10）は検出の通知に使う（Application/aed/notify.c）
 DMA コールバックは TRACE → カウンタ更新 → tk_set_flg だけ行い即 return
@@ -77,7 +82,7 @@ PCM リング（pcm_fifo）は SPSC。消費者を増やせない。推論用は
 フォルト可視化（Application/fault/）: 起動時にベクタテーブルを RAM にコピーし、未実装 IRQ 180本とフォルト例外5本を差し替え。 CFSR/BFAR/スタック上の PC を UART 直叩きで出してから停止。デバッガ接続時は __BKPT で止まるので F8 で続行
 FAULT_TEST（fault.h）: 0=無効 / 1=BusFault / 2=ゼロ除算 / 3=未実装IRQ / 4=STKOF。コミット時は必ず 0
 トレース（Application/trace/）: TRACE(id,arg) で (CYCCNT, id, arg) を記録。trace_start(ms) で区間記録し、終了後に CSV ダンプ。 ダンプ中は trace_muted() で他の出力を抑制
-テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）と NPU_PT_TEST（infer_task.c、パススルー中に乱数入力の推論10回。タスク7 の予行）はタスク9 で本番の推論が入ったので 0。 PREPROC_TEST（infer_task.c、前処理を PC と突き合わせる。タスク8）は 1、AED_USE_TEST_CLIPS（npu_selftest.c、30 本で NPU を判定）は ROM の都合で 0
+テスト用スイッチ: AUDIO_PRIO_TEST（音声タスクを最低優先度にして負荷タスクを回す）、FLASH_PROBE（0x70180000 読み出し確認）。 コミット時は 0 に戻す。 NPU_RISAF_DUMP（npu_hw.c、RISAF の状態表示。読むだけ）と NPU_PT_TEST（infer_task.c、パススルー中に乱数入力の推論10回。タスク7 の予行）はタスク9 で本番の推論が入ったので 0。 PREPROC_TEST（infer_task.c、前処理を PC と突き合わせる。タスク8）は 1、AED_USE_TEST_CLIPS（npu_selftest.c、30 本で NPU を判定）は ROM の都合で 0。 LCD_DIAG（lcd.c、LTDC / RIF / PWR / GPIO のレジスタを表示。読むだけ）はコミット時は 0
 既知の罠
 tm_printf はカーネル起動前（knl_start_mtkernel より前）に使えない。 起動前の初期化関数は Error_Handler() を呼ばず、結果を変数に記録してカーネル起動まで到達させる
 FSBL がペリフェラルを触った状態でアプリが起動する。 HAL_xxx_Init が HAL_ERROR を返したら __HAL_RCC_xxx_FORCE_RESET()/RELEASE_RESET() で戻してから初期化（MDF1 で発生。XSPI2 は最初からリセットしてから初期化している）
@@ -133,6 +138,17 @@ epoch フック（npu_rt_set_epoch_hook）は今は呼ばれない。stai_networ
   起動時の確認（トレースの記録と CSV ダンプ・前処理セルフテスト・予行）が全部終わって本番の窓ループだけになったところで READY のブロックを1回出す（infer_task.c の show_ready_banner。win 行が再開する前の位置）。ログを後から読むとき、ここより後だけを見ればよいと分かるようにするため
 計測にかかわる出力は ==== の2行で囲む（log.h の log_block_begin / log_block_end。区切り2行＋見出し＋区切り2行、本文、区切り2行）。見出しは READY / NPU SELFTEST / PREPROC TEST / TAP TOTAL win=N / PASSTHROUGH STOPPED / FINAL。READY は本文が無いので begin だけ呼ぶ。本文の書式と数値は囲む前と同じまま（既存のパーサを壊さない）。区切りのぶん1ブロックで 4〜5 行増えるので、キューの深さ（log.c の LOG_DEPTH）は 48 にしてある（前処理セルフテストが本文 20 行ほど＋区切りを一度に出す）
   tap の見張り（no window for 2000ms → tap final）は最初の窓を取れてから働かせる。起動直後はビープとプリフィルでサンプルだけが溜まり窓がまだそろわないので、head>0 だけを見ると偽の final が出ていた
+LCD（Phase 2 タスク2-1。Application/lcd/）
+  パネルは RK050HR18 800x480、LTDC 直結。STM32N657 に DSI は無い（stm32n657xx.h に DSI_TypeDef / DSI_BASE が無い。"DSI" のヒットは全部 SPI/XSPI の DSIZE）
+  タイミングは rk050hr18.h（HSYNC/HBP/HFP/VSYNC/VBP/VFP すべて 4）。LTDC への入れ方は ST BSP の stm32n6570_discovery_lcd.c:352-380 MX_LTDC_Init と同じ（HS/VS/DE=AL、PC=IPC、各値 -1）。総画素 812x492
+  画素クロックは main.c の MX_LTDC_Clock_Init（PLL4 = HSI 64MHz/4×75 = 1200MHz → IC16 /48 → LTDC 25MHz。リフレッシュ 62.57Hz）。FSBL は PLL4 を使っていない（PLL_NONE）ので衝突しない。BSP も LTDC←IC16←PLL4 を選ぶが PLL4 自体は設定しない（アプリの仕事）
+  PLL4 の源は HSI。HSE でも動く（FSBL の main.c:209-210 が HSE を起動していて、MX_SAI1_Init の PLL2 が HSE 源で動作実証済み）が、HSI は PLL1＝CPU の源なので FSBL の HSE 起動に依存せず、M=4・N=75 が PLL1 と同じ値で VCO の条件も実証済みになる。アプリ側は発振器を起動しない（OscillatorType = NONE。SAI1・MDF1 も同じ）
+  GPIO とパネルの制御線は BSP の LTDC_MspInit と同じ（信号線は AF14。PQ3 LCD_ONOFF / PQ6 LCD_BL_CTRL / PG13 LCD_DE を H、PE1 は出力にするだけ）
+  ST BSP の LCD ドライバは同梱していない。BSP_LCD_InitEx が L8（パレット）を選べず（RGB565/RGB888/ARGB8888/ARGB4444 のみ）、DMA2D と設定ヘッダ一式を引きずるため、HAL LTDC を直接使う薄い初期化を lcd.c に書いた
+  LTDC も NPU と同じく RIF の設定が要る（lcd.c の rif_config。これが無いと画面が真っ黒）。RIMC_ATTR[10]（RIF_MASTER_INDEX_LTDC1）に MCID=1・MSEC=1・MPRIV=1、RISC の reg3 bit7（RIF_RISC_PERIPH_INDEX_LTDCL1）を SEC|PRIV。番号の出典は STM32CubeN6 v1.3.0 の stm32n6xx_hal_rif.h:74,183、設定値は LTDC サンプル（Examples/LTDC/LTDC_Horizontal_Mirroring/FSBL/Src/main.c:309-314）と同じ。書かないと LTDC のフレームバッファ読み出しが RISAF6 に弾かれて 0 が返る（実機で RISAF6.IASR=0x2＝IAEF を確認。2026-09-24）。LTDC を有効化する前に IACR で IASR を消しておくと、通ったかを後から判定できる
+  L8 の PFCR は 7 が正しい。PF フィールドは 3bit で、L8/ARGB1555/ARGB4444/AL44/AL88 は PF=0x7（LTDC_LxPFCR_PF）を書いて実際の形式を FPF0R / FPF1R で指定する（stm32n6xx_hal_ltdc.c:4037-4048）。HAL のマクロ LTDC_PIXEL_FORMAT_L8（0x9）は HAL 内部の識別子でレジスタの値ではない
+  フレームバッファは L8 + CLUT 16色。CPU で描いてから lcd_flush_rows() で D キャッシュを clean する（LTDC は AXI から直接読む。1行 800B は 32B の倍数なので行境界＝ラインの境界）
+  AXISRAM3 のクロックと電源は npu_hw_init() が入れている（npu_hw.c の NPU_MEMEN に AXISRAM3EN）。LCD 単独で動かすときはそこを確認する
 PowerShell 5.1 用スクリプトは UTF-8 BOM 付きで保存する（BOM 無しだと日本語コメントで param() が壊れる）
 ビルド設定
 Appli プロジェクトは親の Drivers/STM32N6xx_HAL_Driver/Src/ を .project で個別参照している。新しい HAL を使う場合:
@@ -144,6 +160,7 @@ NPU ランタイムの定義・インクルードパス・ライブラリは .cp
 .cproject を CubeIDE の外で書き換えたら、CubeIDE でプロジェクトを Refresh（F5）してからビルドし、Debug/ の mk を作り直させる（scripts/build.sh は既存の mk を使うだけで .cproject を読まない）
 Application/ 配下に新規ファイル・フォルダを作ったら CubeIDE でプロジェクトを Refresh（F5）
 Debug/ 配下の mk 系は CubeIDE が生成する。手動編集しない。ビルド対象の追加・除外は GUI で行い .cproject に永続化する
+Drivers/ に HAL のファイルを足したときも Debug/Drivers/STM32N6xx_HAL_Driver/subdir.mk に4か所（C_SRCS・OBJS・C_DEPS・個別ルール2行と clean）と objects.list が要る。LTDC を足したときは既存の xspi の行を雛形にした
 CubeIDE を開けないまま新しいフォルダ（例 Application/aed/）を scripts/build.sh でビルドするには Debug/ の4か所が要る: sources.mk の SUBDIRS、makefile の -include <dir>/subdir.mk、objects.list（リンクは OBJS ではなくこの静的な一覧を使う。*.list なので git 管理外＝手元だけの変更）、<dir>/subdir.mk（既存フォルダのものをコピーしてファイル名を差し替える。行末は CRLF だが継続行とレシピ行だけ LF）。次に CubeIDE で F5 すれば同じ内容が作り直される
 Git
 コミットメッセージは日本語。1行目は Conventional Commits（feat:, fix:, refactor:, docs: など、スコープは audio/fault/trace/npu 等）、空行、なぜ変えたか
